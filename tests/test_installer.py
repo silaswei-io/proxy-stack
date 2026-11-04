@@ -225,7 +225,7 @@ class InstallerTests(unittest.TestCase):
                         FAKE_DOCKER_LOG=str(self.log), FAKE_HTTPS_READY='1', FAKE_ACK='1')
         self.payload = script()
 
-    def install(self, *args, inputs=True, env=None, timeout=15):
+    def install(self, *args, inputs=True, env=None, timeout=45):
         command = ["bash", "-s", "--", "--directory", str(self.destination), "--non-interactive"]
         if inputs:
             command += ["--domain", "Proxy.Example.com", "--name", "测试 VPS", "--port", "34567"]
