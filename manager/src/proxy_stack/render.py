@@ -2,6 +2,7 @@
 import json
 
 from .model import POLICY, Settings, groups
+from .routes import ASSET_PATTERN, PUBLIC_PATTERN, canonical_path, caddy_rewrites
 
 
 def encoded(value):
@@ -16,9 +17,6 @@ def xray(state):
                       "streamSettings": {"network": "ws", "wsSettings": {"path": state["ws_path"]}}}],
         "outbounds": [{"protocol": "freedom", "tag": "direct"}],
     })
-
-
-ASSET_PATTERN = r"^/sub/[0-9a-f]{48}/(clash\.yaml|qx/(nodes\.txt|full\.conf|rules\.list)|rules/(force-proxy|bootstrap|private|lancidr|apple|icloud|proxy|direct|cncidr)\.yaml)$"
 
 
 def caddy(settings, state, external=False):
@@ -57,11 +55,12 @@ def caddy(settings, state, external=False):
     }}
     @asset {{
         method GET HEAD
-        path_regexp asset {ASSET_PATTERN}
+        path_regexp asset {PUBLIC_PATTERN}
     }}
     handle @asset {{
         root * /srv/public/current
-        header Cache-Control "no-store"
+        route {{
+{caddy_rewrites()}        header Cache-Control "no-store"
         header X-Content-Type-Options "nosniff"
         header Referrer-Policy "no-referrer"
         @yaml path *.yaml
@@ -69,6 +68,7 @@ def caddy(settings, state, external=False):
         @text path *.txt *.conf *.list
         header @text Content-Type "text/plain; charset=utf-8"
         file_server
+        }}
     }}
     handle {{
         respond "Not found" 404
@@ -125,7 +125,8 @@ def public_files(settings, state, cache):
     qx_rules = "\n".join(r.qx().replace(", DIRECT", ", direct") for _, rules in routing for r in rules) + "\n"
     for user in state["users"].values():
         base = "sub/" + user["token"] + "/"
-        url = settings.origin + "/" + base
+        def url(suffix):
+            return settings.origin + canonical_path(user["token"], suffix)
         nodes, qx_nodes = [], []
         for endpoint, path in available:
             node = {"name": endpoint.node_name, "type": "vless", "server": endpoint.domain,
@@ -147,14 +148,14 @@ def public_files(settings, state, cache):
                          "fake-ip-filter": list(dict.fromkeys([settings.domain] + [e.domain for e in endpoints] + ["*.lan", "*.local"]))},
                  "proxies": nodes, "proxy-groups": [{"name": POLICY, "type": "select", "proxies": names or ["REJECT"]}],
                  "rule-providers": {name: {"type": "http", "behavior": "classical", "format": "yaml", "interval": 86400,
-                                             "url": url + "rules/" + name + ".yaml", "path": "./rules/" + name + ".yaml"} for name, _ in routing},
+                                             "url": url("rules/" + name + ".yaml"), "path": "./rules/" + name + ".yaml"} for name, _ in routing},
                  "rules": ["RULE-SET," + name + "," + rules[0].policy for name, rules in routing] + ["MATCH," + POLICY]}
         files[base + "clash.yaml"] = encoded(clash)
         for name, content in providers.items():
             files[base + "rules/" + name + ".yaml"] = content
         files[base + "qx/nodes.txt"] = "".join(qx_nodes)
         files[base + "qx/rules.list"] = qx_rules
-        files[base + "qx/full.conf"] = f"""# proxy-stack v1.0.0; QX native iOS import remains UNVERIFIED.
+        files[base + "qx/full.conf"] = f"""# proxy-stack v1.0.0; Quantumult X native iOS import remains UNVERIFIED.
 # Rules: {cache['quality']}; URLs below are private credentials.
 # No ready nodes means normally proxied traffic is REJECTED.
 # Ready nodes: {len(nodes)}. If zero, wait for node startup/ack and check proxyctl node list.
@@ -170,10 +171,10 @@ server = 119.29.29.29
 static = {POLICY}, {", ".join(names) if names else "reject"}
 
 [server_remote]
-{url}qx/nodes.txt, tag=proxy-stack-node, update-interval=86400, enabled=true
+{url("qx/nodes.txt")}, tag=proxy-stack-node, update-interval=86400, enabled=true
 
 [filter_remote]
-{url}qx/rules.list, tag=proxy-stack-rules, update-interval=86400, enabled=true
+{url("qx/rules.list")}, tag=proxy-stack-rules, update-interval=86400, enabled=true
 
 [server_local]
 

@@ -104,7 +104,7 @@ class HubTests(unittest.TestCase):
         self.assertEqual(alice['proxy-groups'][0]['proxies'], ['IPv4', 'IPv6', 'Domain'])
         self.assertTrue(all(n['uuid'] == self.store.state()['users']['alice']['uuid'] for n in alice['proxies']))
         self.assertNotEqual(alice['proxies'][0]['uuid'], owner['proxies'][0]['uuid'])
-        self.assertTrue(all(p['url'].startswith('https://hub.example.com/sub/') for p in alice['rule-providers'].values()))
+        self.assertTrue(all(p['url'].startswith('https://hub.example.com/' + self.store.state()['users']['alice']['token'] + '/rules/') for p in alice['rule-providers'].values()))
         base = self.store.current() / 'sub' / self.store.state()['users']['alice']['token']
         bootstrap = json.loads((base / 'rules/bootstrap.yaml').read_text())['payload']
         for entry in ('DOMAIN,hub.example.com', 'DOMAIN,node.example.com', 'IP-CIDR,8.8.8.8/32,no-resolve',

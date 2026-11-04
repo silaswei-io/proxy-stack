@@ -72,6 +72,14 @@ with tempfile.TemporaryDirectory(prefix='proxy-stack-native-plan-') as temporary
         assert (issuer.get('profile') == 'shortlived') == (':' in domain or domain == '8.8.8.8')
         assert any(':34567' in s['listen'] for s in adapted['apps']['http']['servers'].values())
         assert set(adapted['logging']['logs']['default']['exclude']) >= {'http.log.access', 'http.log.error'}
+    # Every generated role/layout must pass the actual pinned Caddy parser.
+    for role, local_node in (('hub', 'true'), ('hub', 'false'), ('node', 'false')):
+        for mode in ('standalone', 'existing-caddy'):
+            text = run('docker', 'run', '--rm', '--network', 'none', '-e', 'DOMAIN=proxy.example.com',
+                       '-e', 'ROLE=' + role, '-e', 'LOCAL_NODE=' + local_node, '-e', 'MODE=' + mode,
+                       TOOL, 'preview-caddy')
+            (root / 'layout').write_text(text)
+            caddy('layout', 'validate')
     env = dict(os.environ, DOMAIN='8.8.8.8', PUBLIC_PORT='34567', HTTP_BIND='127.0.0.1', HTTP_PORT='40881', HTTP01_ONLY='true')
     for key in ('COMPOSE_FILE', 'COMPOSE_PROJECT_NAME', 'COMPOSE_PROFILES', 'COMPOSE_ENV_FILES'):
         env.pop(key, None)
@@ -98,7 +106,7 @@ with tempfile.TemporaryDirectory(prefix='proxy-stack-native-plan-') as temporary
     adapter = binary_dir / 'docker'
     adapter.write_text('#!' + sys.executable + '\n' +
         'import os,sys\nargs=sys.argv[1:]\n' +
-        'args=[' + repr(TOOL) + ' if a=="ghcr.io/silaswei/proxy-stack:v1.0.0" else a for a in args]\n' +
+        'args=[' + repr(TOOL) + ' if a=="ghcr.io/silaswei-io/proxy-stack:v1.0.0" else a for a in args]\n' +
         'if args[:1]==["pull"]: args=["image","inspect",args[1]]\n' +
         'if args[:1]==["run"] and "-p" in args: args[args.index("-p")+1]="127.0.0.1::8080"\n' +
         'os.execv(' + repr(real_docker) + ', ["docker"]+args)\n')

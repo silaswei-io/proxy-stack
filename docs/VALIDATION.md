@@ -12,7 +12,7 @@ v1.0.0 为全新首版多机订阅；下方 0.1.x 内容保留为历史验证记
 
 测试只使用唯一临时容器/网络及回环随机高端口，结束自动清理；未连接或修改真实服务器。测试 CA 与仅允许模拟 origin 的出站配置均限于临时测试环境。Linux amd64、公开镜像拉取及最终源代码 revision 的结果以 v1.0.0 发布工作流和 registry 核验记录为准。
 
-公共 ACME 实际签发/续期、原生 iOS QX 导入、真实 VPS 与运营商网络仍需实际环境验收。
+公共 ACME 实际签发/续期、原生 iOS Quantumult X 导入、真实 VPS 与运营商网络仍需实际环境验收。
 
 ## 0.1.x 历史验证
 
@@ -38,7 +38,7 @@ v1.0.0 为全新首版多机订阅；下方 0.1.x 内容保留为历史验证记
 | 更新器只读模型、无 Xray 配置挂载下刷新 | 通过；使用离线模拟上游数据 |
 | shell 语法、Python 语法、空白检查 | 通过 |
 
-单元测试覆盖初始化幂等与设置变更拒绝、独立凭据/撤销、发布哈希、阶段及部分写入失败回退、上游失败保留最后好版本、相对缩减拒绝、跨进程 flock、停止信号、规则优先级/IPv4/IPv6/通配符转换、BOM、QX 区段/引用、注入/不安全 YAML/symlink 拒绝，以及发布切换期间 health 的重试。
+单元测试覆盖初始化幂等与设置变更拒绝、独立凭据/撤销、发布哈希、阶段及部分写入失败回退、上游失败保留最后好版本、相对缩减拒绝、跨进程 flock、停止信号、规则优先级/IPv4/IPv6/通配符转换、BOM、Quantumult X 区段/引用、注入/不安全 YAML/symlink 拒绝，以及发布切换期间 health 的重试。
 
 集成脚本 `python3 tests/integration/run.py` 使用独立命名网络和临时目录，只绑定 `127.0.0.1` 上随机高端口；结束自动删除其测试容器/网络。Xray 默认拦截私有出站目标，因此只在另一份临时测试配置中精确允许模拟服务 IP 的 TCP 8000，生成的生产配置不变。测试不访问真实服务器、公共 ACME 或实时 GitHub 规则源。
 
@@ -48,7 +48,7 @@ Linux amd64 CI 曾在 init 阶段出现 `PermissionError`：非 root runner 创�
 
 ## 尚未验证
 
-- iOS QX 原生节点/完整配置导入、实际设备上的规则刷新和匹配。结构校验和服务端连通均不能替代设备验收。
+- iOS Quantumult X 原生节点/完整配置导入、实际设备上的规则刷新和匹配。结构校验和服务端连通均不能替代设备验收。
 - 公网 ACME 证书签发、真实 DNS、防火墙、用户运营商可达性。
 - 目标 Debian/Ubuntu VPS 上的安装和重启恢复；Linux amd64 已通过 GitHub Actions 实际运行测试。
 - 完整上游数据的规模性能和长时间运行尚未进行基准验证；一次真实下载与更新结果见下方父级补充。自动化测试仍使用离线数据，不把小型 bootstrap 称作完整规则库。
@@ -65,7 +65,7 @@ Linux amd64 CI 曾在 init 阶段出现 `PermissionError`：非 root runner 创�
 - 使用生产 Compose 的实际挂载布局验证通过；实际执行 `proxyctl user add/revoke` 成功，Xray 按预期重启，已撤销订阅 URL 返回 **404**。
 - 全部临时测试数据已清理。
 
-此补充不代表 iOS QX 原生导入、公网 ACME 或用户外部网络可达性已经验收，上述限制继续保留。
+此补充不代表 iOS Quantumult X 原生导入、公网 ACME 或用户外部网络可达性已经验收，上述限制继续保留。
 
 ## v0.1.0 发布验证补充
 
@@ -80,7 +80,7 @@ Linux amd64 CI 曾在 init 阶段出现 `PermissionError`：非 root runner 创�
 - arm64 原生配置、HTTPS、VLESS 出站与撤销集成通过；两种 Compose、shell 语法和 wheel 内模板打包均通过。
 - 独立使用镜像导出的实际脚本在临时目录完成初始化、Compose 配置验证及重跑，凭据保持不变；未启动真实服务器服务。
 - 新安装持久化独立 Compose 项目名，受管包装器清除继承的项目配置变量，避免操作另一目录的服务。
-- Linux amd64 和0.1.1发布结果见 GitHub Actions；公网 ACME、外部可达性和QX iOS仍需实机验收。
+- Linux amd64 和0.1.1发布结果见 GitHub Actions；公网 ACME、外部可达性和Quantumult X iOS仍需实机验收。
 
 
 ## v0.1.2 公网 IP 和宿主机名默认值验证
@@ -93,7 +93,7 @@ Linux amd64 CI 曾在 init 阶段出现 `PermissionError`：非 root runner 创�
 - 仅在独立测试运行配置中将已检查的 ACME 签发器替换为测试 CA；生产配置不变，未安装测试 CA 到系统/客户端。测试等待可验证握手，避免把 CA 文件创建误认为站点证书已经就绪。
 - 工具镜像构建、wheel 构建/安装、版本和模板/bootstrap/discovery 包数据检查通过；更新渲染哈希。shell/Python 语法及 `git diff --check` 通过。临时测试容器、网络和数据自动清理。
 
-公网 IP 的真实 ACME 签发/续期、真实服务器 IPv6 入站、QX iOS 原生导入仍待实机验收；本次未运行 Linux amd64 CI 或发布工作流。安装器明确区分证书待签发和就绪，IP 无需域名/DNS，但公网 80/443 必须可达并持续支持续期。GHCR 包可见性未更改。
+公网 IP 的真实 ACME 签发/续期、真实服务器 IPv6 入站、Quantumult X iOS 原生导入仍待实机验收；本次未运行 Linux amd64 CI 或发布工作流。安装器明确区分证书待签发和就绪，IP 无需域名/DNS，但公网 80/443 必须可达并持续支持续期。GHCR 包可见性未更改。
 
 ## v0.1.2 独立安装检查补充
 

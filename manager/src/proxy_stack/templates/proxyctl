@@ -23,7 +23,7 @@ case "$cmd" in
     fi
     exec 3<>/dev/tty
     while :; do
-      printf '\n代理管理\n订阅与朋友\n  1) 我的订阅 / QX 链接\n  2) 添加朋友并显示订阅\n  3) 撤销朋友\n服务与完成检查\n  4) 重试完成检查\n  5) 服务和规则状态\n  6) 刷新规则\n  7) 更新 v1.0.0 镜像\n节点管理\n  8) 节点同步状态\n  9) 生成限时加入码\n  10) 移除节点\n  11) 加入已有中心\n  0) 退出\n选择: ' >&3
+      printf '\n代理管理\n订阅与朋友\n  1) 我的订阅 / Quantumult X 链接\n  2) 添加朋友并显示订阅\n  3) 撤销朋友\n服务与完成检查\n  4) 重试完成检查\n  5) 服务和规则状态\n  6) 刷新规则\n  7) 更新 v1.0.0 镜像\n节点管理\n  8) 节点同步状态\n  9) 生成限时加入码\n  10) 移除节点\n  11) 加入已有中心\n  0) 退出\n选择: ' >&3
       IFS= read -r choice <&3 || break
       case "$choice" in
         1) "$0" links --labelled || : ;;
@@ -42,7 +42,7 @@ case "$cmd" in
         5) "$0" status || : ;;
         6) "$0" update-rules || : ;;
         7)
-          printf '拉取 v1.0.0 并更新正在运行的服务；保留 .env、模板和凭据。确认？[y/N]: ' >&3
+          printf '拉取 v1.0.0 并更新正在运行的服务；更新官方镜像默认，保留模板和凭据。确认？[y/N]: ' >&3
           IFS= read -r answer <&3 || break
           case "$answer" in y|Y) "$0" upgrade || : ;; esac
           ;;
@@ -69,19 +69,39 @@ case "$cmd" in
     for file in .env compose.yaml compose.external.yaml proxyctl; do
       [ -f "$file" ] && [ ! -L "$file" ] || { echo "unsafe managed file: $file" >&2; exit 2; }
     done
-    tool_image=ghcr.io/silaswei/proxy-stack:v1.0.0
+    tool_image=ghcr.io/silaswei-io/proxy-stack:v1.0.0
     image=$(docker compose config --images manager)
-    [ "$image" = "$tool_image" ] || {
-      echo "upgrade 仅支持 ghcr.io/silaswei/proxy-stack:v1.0.0；自定义镜像请手动迁移。" >&2
+    case "$image" in "$tool_image"|ghcr.io/silaswei/proxy-stack:v1.0.0) ;; *)
+      echo "upgrade 仅支持 ghcr.io/silaswei-io/proxy-stack:v1.0.0；自定义镜像请手动迁移。" >&2
       exit 2
-    }
+    ;; esac
     running=$(docker compose ps --services --status running)
     docker pull "$tool_image"
+    if [ "$image" != "$tool_image" ]; then
+      # Change only the official image default, preserving dotenv bytes otherwise.
+      # Validate the resolved result before recreating any running service.
+      image_env=$(mktemp .env.upgrade.XXXXXXXX)
+      cp -p .env "$image_env"
+      if ! awk -v image="$tool_image" '
+        /^TOOL_IMAGE=/ { if (!seen++) print "TOOL_IMAGE=" image; next }
+        { print }
+        END { if (!seen) print "TOOL_IMAGE=" image }
+      ' .env > "$image_env"; then rm -f "$image_env"; exit 1; fi
+      image_backup=$(mktemp .env.upgrade-backup.XXXXXXXX)
+      cp -p .env "$image_backup"
+      mv -f "$image_env" .env
+      if [ "$(docker compose config --images manager)" != "$tool_image" ]; then
+        mv -f "$image_backup" .env
+        echo "无法切换官方镜像；.env 已恢复，请手动审查 Compose。" >&2
+        exit 2
+      fi
+      rm -f "$image_backup"
+    fi
     if [ -n "$running" ]; then
       # Compose service names are validated identifiers returned by Compose.
       docker compose up -d --no-deps --no-build --pull never --force-recreate $running
     fi
-    echo "v1.0.0 镜像已更新；.env、模板和身份保留。请检查 node list 和服务状态。"
+    echo "v1.0.0 镜像已更新；官方镜像默认已更新，模板和身份保留。请检查 node list 和服务状态。"
     ;;
   node)
     if [ "${1:-}" = join ]; then

@@ -7,7 +7,7 @@
 支持 **Linux、本机 rootful Docker Engine、Compose ≥ 2.24.4、Bash 和 GNU coreutils（timeout/sha256sum）**。不支持 Docker Desktop 的端口预检、远程 Docker 或 rootless Docker。独立安装不需要宿主 Python/git；自动集成宿主 Caddy 需要 Linux root、systemd、Python 3 和 `ss`。
 
 ```sh
-docker run --pull=always --rm ghcr.io/silaswei/proxy-stack:v1.0.0 installer | bash
+docker run --pull=always --rm ghcr.io/silaswei-io/proxy-stack:v1.0.0 installer | bash
 ```
 
 向导逐行选择「中心 + 本机节点」（默认）、「仅订阅中心」或「加入已有中心」。地址默认探测到的公网 IP，名称默认 hostname，均可回车接受；公共 HTTPS 端口默认选取 **20000–59999 的空闲随机端口**，也可自行输入。`--port 52789` 指定端口（1–65535，80 留给 HTTP-01）。安装前及激活前都会重新检查占用；订阅与节点地址包含所选端口，重复运行保留已选端口。
@@ -19,11 +19,11 @@ docker run --pull=always --rm ghcr.io/silaswei/proxy-stack:v1.0.0 installer | ba
 先看完整计划，再安装；`--check`（同 `--plan`）可拉取/验证镜像、创建私有临时计划和短暂端口探测容器，但不写入安装目录、启动栈或重载宿主：
 
 ```sh
-docker run --rm ghcr.io/silaswei/proxy-stack:v1.0.0 installer | bash -s -- \
+docker run --rm ghcr.io/silaswei-io/proxy-stack:v1.0.0 installer | bash -s -- \
   --check --domain YOUR_PUBLIC_IP --port 52789 --directory /opt/proxy-stack
 
 # 无交互：--manage-host-caddy 仅授权计划中的宿主 HTTP-01 路由事务。
-docker run --rm ghcr.io/silaswei/proxy-stack:v1.0.0 installer | bash -s -- \
+docker run --rm ghcr.io/silaswei-io/proxy-stack:v1.0.0 installer | bash -s -- \
   --non-interactive --domain YOUR_PUBLIC_IP --port 52789 \
   --manage-host-caddy --directory /opt/proxy-stack
 ```
@@ -45,7 +45,7 @@ docker run --rm ghcr.io/silaswei/proxy-stack:v1.0.0 installer | bash -s -- \
 普通重跑会发现未完成事务，先安全恢复；也可只恢复，不继续安装：
 
 ```sh
-docker run --rm ghcr.io/silaswei/proxy-stack:v1.0.0 installer | bash -s -- \
+docker run --rm ghcr.io/silaswei-io/proxy-stack:v1.0.0 installer | bash -s -- \
   --directory /opt/proxy-stack --recover
 ```
 
@@ -56,7 +56,7 @@ docker run --rm ghcr.io/silaswei/proxy-stack:v1.0.0 installer | bash -s -- \
 ```sh
 /opt/proxy-stack/proxyctl finish       # 单次最多约 4 秒；待完成返回 1，就绪返回 0
 /opt/proxy-stack/proxyctl finish --wait 120
-/opt/proxy-stack/proxyctl menu         # 重试完成检查；我的订阅查看 QX 等链接
+/opt/proxy-stack/proxyctl menu         # 重试完成检查；我的订阅查看 Quantumult X 等链接
 ```
 
 `finish` 仅在公共 HTTPS 返回本中心内容、至少一个已确认当前配置且租约有效的节点时显示一个 Mihomo 主 URL；仅中心需要远程就绪节点。检查始终验证 TLS，不跟随重定向、不使用环境代理，网络等待不持有状态锁。节点检查自身 HTTPS/WSS 和运行/同步，不检查订阅。它不代表真实客户端导入或代理出站验收，也不能保证云防火墙、NAT、公共 ACME 签发和持续续期。
@@ -78,10 +78,14 @@ docker run --rm ghcr.io/silaswei/proxy-stack:v1.0.0 installer | bash -s -- \
 ./proxyctl status
 ./proxyctl verify                   # 中心真实 HTTPS 资源哈希、MIME、GET/HEAD 检查
 ./proxyctl update-rules
-./proxyctl upgrade                  # 拉取 v1.0.0，重建原本运行的服务；保留配置和模板
+./proxyctl upgrade                  # 拉取 v1.0.0，重建原本运行的服务；保留身份与模板，迁移旧官方镜像默认
 ./proxyctl up
 ./proxyctl down                     # 保留数据与证书，不接受删除参数
 ```
+
+订阅使用不带扩展名的私密地址：`https://host/<48hex-token>/clash`、`/<48hex-token>/quantumult-x`（完整配置）、`/<48hex-token>/quantumult-x/nodes`、`/<48hex-token>/quantumult-x/rules`。Mihomo 规则资源为 `/<48hex-token>/rules/<name>`。token 保持原有 48 位十六进制熵；旧 `/sub/<token>/clash.yaml`、`/sub/<token>/qx/...` 和规则地址继续可用。Caddy 仅对精确 GET/HEAD 做内部映射，不跳转、不接受查询参数；底层文件和 manifest 路径保持兼容。
+
+官方项目与镜像命名空间为 `silaswei-io/proxy-stack`，公开版本仍为 `v1.0.0`。旧 `ghcr.io/silaswei/proxy-stack:v1.0.0` 的受管安装可重跑新安装器或运行新版 `proxyctl upgrade`，仅迁移官方镜像默认，保留 UUID、token、WS 路径和其他设置。自定义镜像和其他标签需手动迁移。已有安装要启用新订阅路由，请正常重跑新安装器（不用 `--prepare-only`）；`proxyctl upgrade` 只更新镜像默认与原本运行的服务，保留现有运行配置。安装器的模板更新仍使用原有事务备份/回滚；upgrade 在解析新镜像失败时恢复 `.env`，服务重建失败时可将 TOOL_IMAGE 恢复为旧官方地址后重试。
 
 节点不生成自己的订阅链接；所有订阅与规则链接均指向中心，节点连接地址使用各节点自己的 IP/域名和 WS 路径。owner 永久保留；朋友标识匹配 `[a-z][a-z0-9_-]{0,31}`。添加/撤销不会更改其他用户的 UUID/token/URL。用户变更由各节点自动应用，重启该节点的 Xray 会中断其已有连接。
 
@@ -136,6 +140,6 @@ sudo python3 tests/integration/run.py
 
 native 预检用私有配置和回环随机端口；macOS 上的测试适配器仅替换 Linux 宿主判定、缓存镜像和探测绑定，不证明 Docker Desktop 的端口占用能力。完整集成测试仅使用独立临时容器/网络、回环随机高端口与显式测试 CA。覆盖实际 Mihomo 经两台受监督 Xray 的 HTTPS/WSS/VLESS 出站、各节点独立用户同步与撤销、失联/阻塞期间租约停止、失败启动不回执、移除、稳定中心 URL；保留单节点和 IPv4/IPv6 SAN、无 SNI、错误证书拒绝、规则隔离测试。测试仅在独立临时配置中放行模拟 origin 的 IP:8000，不改变生产配置。Linux 需 sudo，以保持 root 所有的私有挂载和 `cap_drop ALL`；不能用放宽私有目录权限替代。
 
-发布工作流在 main push 或 main 手动触发，测试后构建 amd64/arm64 immutable `sha-<revision>` 镜像；发布串行执行，确认仍为当前 main 才更新唯一用户入口 `ghcr.io/silaswei/proxy-stack:v1.0.0`。历史标签保留。
+发布工作流在 main push 或 main 手动触发，测试后构建 amd64/arm64 immutable `sha-<revision>` 镜像；发布串行执行，确认仍为当前 main 才更新唯一用户入口 `ghcr.io/silaswei-io/proxy-stack:v1.0.0`。历史标签保留。
 
-**QX 原生 iOS 导入、公共 ACME 签发/续期和真实 VPS/运营商网络尚未在本地环境验证。** 见 [客户端验收](docs/CLIENTS.md) 与 [验证记录](docs/VALIDATION.md)。代码 MIT；下载规则遵循上游 GPL-3.0，见 [第三方归属](docs/THIRD_PARTY.md)。
+**Quantumult X 原生 iOS 导入、公共 ACME 签发/续期和真实 VPS/运营商网络尚未在本地环境验证。** 见 [客户端验收](docs/CLIENTS.md) 与 [验证记录](docs/VALIDATION.md)。代码 MIT；下载规则遵循上游 GPL-3.0，见 [第三方归属](docs/THIRD_PARTY.md)。

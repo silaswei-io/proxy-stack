@@ -25,6 +25,7 @@ import uuid
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "manager/src"))
 TOOL = os.environ.get("TEST_TOOL_IMAGE", "proxy-stack-tool:v1.0.0")
 XRAY = os.environ.get("TEST_XRAY_IMAGE", "ghcr.io/xtls/xray-core:26.7.11@sha256:a1644183accdb0b5be967093fe34be756fd5de15fe2ee0206e842ae17350967f")
 CADDY = os.environ.get("TEST_CADDY_IMAGE", "caddy:2.11.4@sha256:0c994536bddb66445885237f1a5dcc1916bccea922661c76b4e9fc24061f9b52")
@@ -383,16 +384,40 @@ def main():
                     connection.close()
 
             asset = "/sub/" + token + "/clash.yaml"
+            from proxy_stack.routes import asset_paths
             for tls in (False, True):
-                status, headers, body = request(asset, tls=tls)
-                assert status == 200 and headers["Cache-Control"] == "no-store"
-                assert json.loads(body)["proxies"][0]["uuid"] == state["users"]["owner"]["uuid"]
-                assert request(asset, method="HEAD", tls=tls)[0] == 200
+                for clean, legacy, mime in asset_paths(token):
+                    status, headers, body = request(clean, tls=tls)
+                    assert status == 200 and headers["Content-Type"].split(';')[0] == mime
+                    assert headers["Cache-Control"] == "no-store"
+                    assert headers["Referrer-Policy"] == "no-referrer" and headers["X-Content-Type-Options"] == "nosniff"
+                    assert request('/' + legacy, tls=tls)[2] == body
+                    for alias in (clean, '/' + legacy):
+                        status, head, empty = request(alias, method="HEAD", tls=tls)
+                        assert status == 200 and not empty and head['Content-Type'].split(';')[0] == mime
+                        for method in ('POST', 'PUT', 'DELETE', 'OPTIONS'):
+                            assert request(alias, method=method, tls=tls)[0] == 404
+                    if clean.endswith('/clash'):
+                        config = json.loads(body)
+                        assert config["proxies"][0]["uuid"] == state["users"]["owner"]["uuid"]
+                        urls = [provider['url'] for provider in config['rule-providers'].values()]
+                    elif clean.endswith('/quantumult-x'):
+                        urls = re.findall(r'https://[^,\s]+', body.decode())
+                    else:
+                        urls = []
+                    for url in urls:
+                        from urllib.parse import urlsplit
+                        path = urlsplit(url).path
+                        assert path.startswith('/' + token + '/') and not path.endswith(('.yaml', '.txt', '.list', '.conf'))
+                        assert request(path, tls=tls)[0] == 200
                 for path in ("/", "/manifest.json", "/releases/", "/sub/" + token + "/", "/sub/" + token + "/qx/../clash.yaml",
                              "/sub/" + token + "/%2e%2e/%2e%2e/model/state.json", "/sub/" + "0" * 48 + "/clash.yaml",
-                             asset + "?extra=1", asset.replace("/clash.yaml", "/./clash.yaml"), asset.replace("/clash.yaml", "//clash.yaml")):
+                             asset + "?extra=1", asset.replace("/clash.yaml", "/./clash.yaml"), asset.replace("/clash.yaml", "//clash.yaml"),
+                             '/' + token + '/', '/' + token + '/rules/unknown', '/' + token + '/quantumult-x/../clash',
+                             '/' + token + '/rules/%2e%2e/clash', '/' + token + '/clash?extra=1',
+                             '/' + token + '//clash', '/' + token + '/./clash', '/' + token + '/clash/',
+                             '/' + '0' * 48 + '/clash', '/' + token + '/clash.yaml'):
                     assert request(path, tls=tls)[0] == 404, path
-                assert request(asset, method="POST", tls=tls)[0] == 404
                 for control_path in ('poll','ack','detach'):
                     # Empty POST bodies are rejected by the actual internal API,
                     # proving Caddy forwards exact routes in HTTP and TLS modes.
@@ -407,7 +432,11 @@ def main():
             ip_integration(root, data, identifier, containers, state, origin_ip)
             old = state["users"]["alice"]
             manager("user", "revoke", "alice")
-            assert request("/sub/" + old["token"] + "/clash.yaml")[0] == 404
+            for clean, legacy, _ in asset_paths(old['token']):
+                for alias in (clean, '/' + legacy):
+                    for method in ('GET', 'HEAD'):
+                        assert request(alias, method=method)[0] == 404
+                        assert request(alias, method=method, tls=True)[0] == 404
             wait_xray()
             tunnel(tls_port, context, state, state["users"]["owner"], origin_ip)
             tunnel(tls_port, context, state, state["users"]["bob"], origin_ip)
@@ -433,7 +462,7 @@ def main():
             multinode_integration(root, identifier, containers)
         except BaseException:
             for name in containers:
-                print("DIAGNOSTIC (disposable test container): " + name + "\n" + re.sub(r"(/sub/|/ws/)[0-9a-f]{48}", r"\1[redacted]", docker("logs", name, check=False)), flush=True)
+                print("DIAGNOSTIC (disposable test container): " + name + "\n" + re.sub(r"/[0-9a-f]{48}(?=/|[\s?\"]|$)", "/[redacted]", docker("logs", name, check=False)), flush=True)
             raise
         finally:
             for name in reversed(containers):

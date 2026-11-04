@@ -73,7 +73,7 @@ class Settings:
             except ValueError:
                 raise ValueError("DOMAIN must be an ASCII DNS hostname or global public IP (no scheme/path/port/brackets/zone)") from None
             object.__setattr__(self, "domain", str(address))
-        # QX comma-delimited tag syntax has no universally supported quoting.
+        # Quantumult X comma-delimited tag syntax has no universally supported quoting.
         if not name or name != name.strip() or len(name) > 80 or any(not (c.isalnum() or c in " ._-()") for c in name):
             raise ValueError("NODE_NAME contains unsupported configuration characters")
         if name.lower() in ("proxy", "direct", "reject", POLICY.lower()):

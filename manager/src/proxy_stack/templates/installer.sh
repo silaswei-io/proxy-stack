@@ -2,12 +2,12 @@
 # proxy-stack v1.0.0; prompts use /dev/tty, never the piped script's stdin.
 set -euo pipefail
 umask 077
-tool_image=ghcr.io/silaswei/proxy-stack:v1.0.0
+tool_image=ghcr.io/silaswei-io/proxy-stack:v1.0.0
 caddy_image=caddy:2.11.4@sha256:0c994536bddb66445885237f1a5dcc1916bccea922661c76b4e9fc24061f9b52
 domain= node_name= directory= port= mode=auto role= local_node=true
 join_code_file= join_code= prepare_only=false non_interactive=false check_only=false
 manage_host=false repeat=false host_route=false http_port=80 http_bind=0.0.0.0
-committed=false project= phase=preflight recover_only=false reconfigure=false
+committed=false project= phase=preflight recover_only=false reconfigure=false namespace_change=false
 fail() { printf 'proxy-stack: %s\n' "$*" >&2; exit 1; }
 usage() {
   printf '%s\n' 'Usage: bash installer.sh [--domain DOMAIN --name NAME --port PORT] [--directory PATH]' \
@@ -111,11 +111,18 @@ if [ -e "$directory/$marker" ] || [ -L "$directory/$marker" ]; then
   while IFS='=' read -r key value; do
     value=${value#\'}; value=${value%\'}
     case "$key" in
+      TOOL_IMAGE) case "$value" in "$tool_image"|ghcr.io/silaswei/proxy-stack:v1.0.0) ;; *) fail '自定义工具镜像需手动迁移；原安装未改变。' ;; esac ;;
       DOMAIN) domain=$value ;; NODE_NAME) node_name=$value ;; PUBLIC_PORT) port=$value ;;
       MODE) mode=$value ;; ROLE) role=$value ;; LOCAL_NODE) local_node=$value ;;
       HTTP_PORT) http_port=$value ;; HTTP_BIND) http_bind=$value ;; COMPOSE_PROJECT_NAME) project=$value ;;
     esac
   done < "$directory/.env"
+  installed_image=$(cd -- "$directory" && timeout 10 docker compose config --images manager) || fail '无法验证受管工具镜像。'
+  case "$installed_image" in
+    "$tool_image") ;;
+    ghcr.io/silaswei/proxy-stack:v1.0.0) namespace_change=true ;;
+    *) fail '自定义工具镜像需手动迁移；原安装未改变。' ;;
+  esac
   previous_mode=$mode
   [ -z "$requested_domain" ] || domain=$requested_domain
   [ -z "$requested_name" ] || node_name=$requested_name
@@ -129,7 +136,7 @@ if [ -e "$directory/$marker" ] || [ -L "$directory/$marker" ]; then
   valid_port "${port:-443}" && valid_port "$http_port" || fail '受管端口配置无效；保留原文件。'
   [[ "$project" =~ ^proxy-stack-[a-zA-Z0-9_-]+$ ]] || fail '受管 Compose 标识无效。'
   printf '已有受管 v1.0.0；预检重试/重配，保留身份。\n'
-  if $prepare_only && ! $check_only && [ -z "$requested_domain$requested_name$requested_port$requested_role" ] && [ "$requested_mode" = auto ]; then printf '菜单：%q menu\n' "$directory/proxyctl"; exit 0; fi
+  if $prepare_only && ! $namespace_change && ! $check_only && [ -z "$requested_domain$requested_name$requested_port$requested_role" ] && [ "$requested_mode" = auto ]; then printf '菜单：%q menu\n' "$directory/proxyctl"; exit 0; fi
 elif [ -e "$directory" ]; then
   [ -d "$directory" ] || fail '安装目标不是目录。'
   shopt -s nullglob dotglob; entries=("$directory"/*); shopt -u nullglob dotglob
@@ -188,7 +195,7 @@ prompt() {
   printf '%s' "$2" >&3
   IFS= read -r reply <&3 || fail '输入已结束。'
 }
-if ! $repeat; then
+if ! $repeat || $namespace_change; then
   printf '正在预检 v1.0.0…\n'
   printf '准备工具镜像（最多 120 秒）…\n'
   quiet timeout 120 docker pull "$tool_image" || fail '无法拉取 v1.0.0；安装目录未写入。'
@@ -265,7 +272,12 @@ else
 fi
 {
   while IFS= read -r line; do
-    case "$line" in DOMAIN=*|NODE_NAME=*|MODE=*|ROLE=*|LOCAL_NODE=*|PUBLIC_PORT=*|HTTP_PORT=*|HTTP_BIND=*|HTTP01_ONLY=*|COMPOSE_PROJECT_NAME=*|COMPOSE_FILE=*) ;; *) printf '%s\n' "$line" ;; esac
+    case "$line" in
+      TOOL_IMAGE=*)
+        value=${line#TOOL_IMAGE=}; value=${value#\'}; value=${value%\'}
+        case "$value" in "$tool_image"|ghcr.io/silaswei/proxy-stack:v1.0.0) printf 'TOOL_IMAGE=%s\n' "$tool_image" ;; *) fail '自定义工具镜像需手动迁移。' ;; esac
+        ;;
+      DOMAIN=*|NODE_NAME=*|MODE=*|ROLE=*|LOCAL_NODE=*|PUBLIC_PORT=*|HTTP_PORT=*|HTTP_BIND=*|HTTP01_ONLY=*|COMPOSE_PROJECT_NAME=*|COMPOSE_FILE=*) ;; *) printf '%s\n' "$line" ;; esac
   done < "$env_source"
   printf "DOMAIN='%s'\nNODE_NAME='%s'\nMODE='%s'\nPUBLIC_PORT=%s\n" "$domain" "$node_name" "$mode" "$port"
   printf 'HTTP_BIND=%s\nHTTP_PORT=%s\nHTTP01_ONLY=true\nROLE=%s\nLOCAL_NODE=%s\nCOMPOSE_PROJECT_NAME=%s\n' "$http_bind" "$http_port" "$role" "$local_node" "$project"

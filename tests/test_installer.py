@@ -39,7 +39,7 @@ if args[:3] == ['compose', 'version', '--short']:
 if args[:3] == ['compose', '--progress', 'quiet']:
     args = ['compose'] + args[3:]
 if args[0] == 'pull':
-    assert args[1] == 'ghcr.io/silaswei/proxy-stack:v1.0.0' or args[1].startswith('caddy:2.11.4@sha256:')
+    assert args[1] == 'ghcr.io/silaswei-io/proxy-stack:v1.0.0' or args[1].startswith('caddy:2.11.4@sha256:')
     print('fake Docker pull progress', file=sys.stderr)
     sys.exit(int(os.environ.get('FAKE_PULL_FAIL', '0')))
 if args[0] in ('network', 'volume') and args[1] == 'ls':
@@ -114,7 +114,8 @@ if args[0] == 'run':
 assert args[0] == 'compose', args
 assert os.environ.get('COMPOSE_FILE') != '/unrelated/compose.yaml', 'inherited Compose configuration'
 if args[1] == 'config' and '--images' in args:
-    print(os.environ.get('FAKE_TOOL_IMAGE', 'ghcr.io/silaswei/proxy-stack:v1.0.0'));sys.exit(0)
+    values = dict(line.split('=', 1) for line in Path('.env').read_text().splitlines() if '=' in line and not line.startswith('#'))
+    print(os.environ.get('FAKE_TOOL_IMAGE', values.get('TOOL_IMAGE', 'ghcr.io/silaswei-io/proxy-stack:v1.0.0').strip("'")));sys.exit(0)
 if args[1] == 'ps' and '--services' in args:
     print(os.environ.get('FAKE_RUNNING', 'hub\nxray\nupdater\ncaddy'));sys.exit(0)
 if args[1] == 'run':
@@ -247,7 +248,7 @@ class InstallerTests(unittest.TestCase):
         templates = files("proxy_stack").joinpath("templates")
         for name in ("compose.yaml", "compose.external.yaml", ".env.example", "proxyctl"):
             self.assertEqual((self.destination / name).read_text(), templates.joinpath(name).read_text())
-        self.assertIn("ghcr.io/silaswei/proxy-stack:" + __version__, (self.destination / ".env").read_text())
+        self.assertIn("ghcr.io/silaswei-io/proxy-stack:" + __version__, (self.destination / ".env").read_text())
         self.assertNotIn("EXPORT_TEMPLATES", exported)
 
     def test_fresh_install_finishes_after_up_without_unverified_links(self):
@@ -290,7 +291,7 @@ class InstallerTests(unittest.TestCase):
         owner = json.loads((self.destination / 'data/model/state.json').read_text())['users']['owner']
         for secret in owner.values():
             self.assertNotIn(secret, log_path.read_text() + self.log.read_text() + result.stderr)
-        self.assertEqual(self.calls().count(['pull', 'ghcr.io/silaswei/proxy-stack:v1.0.0']), 1)
+        self.assertEqual(self.calls().count(['pull', 'ghcr.io/silaswei-io/proxy-stack:v1.0.0']), 1)
         self.assertFalse(any('links' in c or 'verify' in c for c in self.calls()))
 
     def test_failed_pull_retains_useful_private_log_and_no_install(self):
@@ -320,12 +321,12 @@ class InstallerTests(unittest.TestCase):
         self.assert_ok(result)
         self.assertIn('订阅就绪', result.stdout)
         self.assertEqual(result.stdout.count('https://'), 1)
-        self.assertIn('/sub/', result.stdout)
+        self.assertRegex(result.stdout, r'https://[^\s]+/[0-9a-f]{48}/clash')
         after = {str(p.relative_to(self.destination)): p.read_bytes()
                  for p in self.destination.rglob('*') if p.is_file()}
         self.assertEqual({k:v for k,v in before.items() if k != 'data/model/heartbeats.json'},
                          {k:v for k,v in after.items() if k != 'data/model/heartbeats.json'})
-        self.assertFalse(any('init' in c or c[0] == 'pull' and c[1] == 'ghcr.io/silaswei/proxy-stack:v1.0.0' for c in self.calls()))
+        self.assertFalse(any('init' in c or c[0] == 'pull' and c[1] == 'ghcr.io/silaswei-io/proxy-stack:v1.0.0' for c in self.calls()))
         code, output = self.terminal([str(self.destination / 'proxyctl'), 'menu'], '4\n0\n')
         self.assertEqual(code, 0, output)
         self.assertIn('订阅就绪', output)
@@ -352,7 +353,7 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual((self.destination / 'proxyctl').read_text(), files('proxy_stack').joinpath('templates/proxyctl').read_text())
         self.assertFalse(any('init' in c for c in self.calls()))
         self.assertTrue(any('--force-recreate' in c for c in self.calls()))
-        self.assertIn(':45678/sub/', result.stdout)
+        self.assertRegex(result.stdout, r':45678/[0-9a-f]{48}/clash')
 
     def test_reconfigure_rolls_back_exact_files_state_and_prior_services(self):
         self.assert_ok(self.install('--prepare-only'))
@@ -422,7 +423,7 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(after['settings']['port'], 45678)
         self.assertTrue(after['settings']['http01_only'])
         self.assertNotIn('COMPOSE_FILE=', '\n'.join(line for line in (self.destination / '.env').read_text().splitlines() if not line.startswith('#')))
-        self.assertIn(':45678/sub/', result.stdout)
+        self.assertRegex(result.stdout, r':45678/[0-9a-f]{48}/clash')
         self.assertTrue(host.config.read_bytes().startswith(original_host))
 
 
@@ -531,7 +532,7 @@ class InstallerTests(unittest.TestCase):
 
     def test_v1_pull_and_explicit_image_update_preserve_actual_files(self):
         self.assert_ok(self.install('--prepare-only'))
-        self.assertEqual(self.calls().count(['pull', 'ghcr.io/silaswei/proxy-stack:v1.0.0']), 1)
+        self.assertEqual(self.calls().count(['pull', 'ghcr.io/silaswei-io/proxy-stack:v1.0.0']), 1)
         before = {str(p.relative_to(self.destination)): p.read_bytes() for p in self.destination.rglob('*') if p.is_file()}
         self.log.write_text('')
         self.assert_ok(self.install('--prepare-only', inputs=False))
@@ -539,9 +540,69 @@ class InstallerTests(unittest.TestCase):
         result = subprocess.run([str(self.destination / 'proxyctl'), 'upgrade'], env=dict(self.env, FAKE_ACK='0'),
                                 text=True, capture_output=True, timeout=10)
         self.assert_ok(result)
-        self.assertEqual(self.calls().count(['pull', 'ghcr.io/silaswei/proxy-stack:v1.0.0']), 1)
+        self.assertEqual(self.calls().count(['pull', 'ghcr.io/silaswei-io/proxy-stack:v1.0.0']), 1)
         self.assertIn(['compose','up','-d','--no-deps','--no-build','--pull','never','--force-recreate','hub','xray','updater','caddy'],self.calls())
         self.assertEqual(before, {str(p.relative_to(self.destination)):p.read_bytes() for p in self.destination.rglob('*') if p.is_file()})
+
+    def legacy_image(self):
+        dotenv = self.destination / '.env'
+        dotenv.write_text(dotenv.read_text().replace('silaswei-io/proxy-stack', 'silaswei/proxy-stack'))
+        compose = self.destination / 'compose.yaml'
+        compose.write_text(compose.read_text().replace('silaswei-io/proxy-stack', 'silaswei/proxy-stack'))
+
+    def test_same_v1_installer_migrates_old_official_namespace_and_keeps_identity(self):
+        self.assert_ok(self.install('--prepare-only'))
+        self.legacy_image()
+        before = json.loads((self.destination / 'data/model/state.json').read_text())
+        self.log.write_text('')
+        self.assert_ok(self.install())
+        self.assertIn('TOOL_IMAGE=ghcr.io/silaswei-io/proxy-stack:v1.0.0', (self.destination / '.env').read_text())
+        after = json.loads((self.destination / 'data/model/state.json').read_text())
+        for key in ('users', 'ws_path', 'settings'):
+            self.assertEqual(before[key], after[key])
+        self.assertIn(['pull', 'ghcr.io/silaswei-io/proxy-stack:v1.0.0'], self.calls())
+
+    def test_upgrade_migrates_only_official_image_default_preserving_private_files(self):
+        self.assert_ok(self.install('--prepare-only'))
+        self.legacy_image()
+        before = {str(p.relative_to(self.destination)): p.read_bytes() for p in self.destination.rglob('*') if p.is_file()}
+        self.log.write_text('')
+        result = subprocess.run([str(self.destination / 'proxyctl'), 'upgrade'], env=dict(self.env, FAKE_ACK='0'),
+                                text=True, capture_output=True, timeout=10)
+        self.assert_ok(result)
+        after = {str(p.relative_to(self.destination)): p.read_bytes() for p in self.destination.rglob('*') if p.is_file()}
+        self.assertEqual(after.pop('.env'), before.pop('.env').replace(b'silaswei/proxy-stack', b'silaswei-io/proxy-stack'))
+        self.assertEqual(before, after)
+        self.assertIn(['pull', 'ghcr.io/silaswei-io/proxy-stack:v1.0.0'], self.calls())
+
+    def test_custom_and_wrong_version_images_rejected_before_mutation(self):
+        self.assert_ok(self.install('--prepare-only'))
+        before = {str(p.relative_to(self.destination)): p.read_bytes() for p in self.destination.rglob('*') if p.is_file()}
+        for image in ('example/custom:v1.0.0', 'ghcr.io/silaswei/proxy-stack:v1.0.1',
+                      'ghcr.io/silaswei-io/proxy-stack:latest'):
+            self.log.write_text('')
+            env = dict(self.env, FAKE_TOOL_IMAGE=image)
+            result = subprocess.run([str(self.destination / 'proxyctl'), 'upgrade'], env=env,
+                                    text=True, capture_output=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotEqual(self.install(env=env).returncode, 0)
+            self.assertFalse(any(call[0] == 'pull' or 'up' in call for call in self.calls()))
+            self.assertEqual(before, {str(p.relative_to(self.destination)): p.read_bytes() for p in self.destination.rglob('*') if p.is_file()})
+        dotenv = self.destination / '.env'
+        dotenv.write_text(dotenv.read_text().replace('ghcr.io/silaswei-io/proxy-stack:v1.0.0', 'example/custom:v1.0.0'))
+        self.assertNotEqual(self.install().returncode, 0)
+
+    def test_upgrade_unresolvable_namespace_change_restores_dotenv(self):
+        self.assert_ok(self.install('--prepare-only'))
+        self.legacy_image()
+        before = (self.destination / '.env').read_bytes()
+        self.log.write_text('')
+        result = subprocess.run([str(self.destination / 'proxyctl'), 'upgrade'],
+                                env=dict(self.env, FAKE_TOOL_IMAGE='ghcr.io/silaswei/proxy-stack:v1.0.0'),
+                                text=True, capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(before, (self.destination / '.env').read_bytes())
+        self.assertFalse(any('up' in call for call in self.calls()))
 
     def test_refuses_nonempty_unmanaged_and_symlink_paths(self):
         self.destination.mkdir()
@@ -693,8 +754,8 @@ class InstallerTests(unittest.TestCase):
         result = self.install('--manage-host-caddy', env=env)
         self.assert_ok(result)
         self.assertIn('订阅就绪', result.stdout)
-        self.assertIn(':34567/sub/', result.stdout)
-        self.assertNotIn('QX 完整配置', result.stdout)
+        self.assertRegex(result.stdout, r':34567/[0-9a-f]{48}/clash')
+        self.assertNotIn('Quantumult X 完整配置', result.stdout)
         state = (self.destination / 'data/model/state.json').read_bytes()
         dotenv = (self.destination / '.env').read_bytes()
         self.assertTrue(host.config.read_bytes().startswith(original))

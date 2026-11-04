@@ -14,6 +14,7 @@ from . import __version__
 from .model import Settings, default_node_name, username
 from .rules import download
 from .storage import Store
+from .routes import asset_paths
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -34,34 +35,36 @@ def verify(store, base_url=None):
             raise ValueError("verify base must be HTTP(S)")
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect, urllib.request.HTTPSHandler(context=ssl.create_default_context()))
         token = state["users"]["owner"]["token"]
-        prefix = "sub/" + token + "/"
         checked = 0
-        for name, expected in manifest["files"].items():
-            if not name.startswith(prefix):
-                continue
-            for method in ("GET", "HEAD"):
-                request = urllib.request.Request(origin + "/" + name, method=method)
-                with opener.open(request, timeout=20) as response:
-                    if response.status != 200 or response.headers.get("Cache-Control") != "no-store":
-                        raise ValueError("invalid asset response")
-                    expected_type = "application/yaml" if name.endswith(".yaml") else "text/plain"
-                    if response.headers.get_content_type() != expected_type:
-                        raise ValueError("unexpected asset MIME type")
-                    if method == "GET":
-                        digest = hashlib.sha256()
-                        total = 0
-                        while True:
-                            chunk = response.read(65536)
-                            if not chunk:
-                                break
-                            total += len(chunk)
-                            if total > 128 * 1024 * 1024:
-                                raise ValueError("published asset too large")
-                            digest.update(chunk)
-                        if digest.hexdigest() != expected:
-                            raise ValueError("served asset differs from revision")
-            checked += 1
-        for path in ("/", "/manifest.json", "/current/", "/sub/" + token + "/", "/sub/" + "0" * 48 + "/clash.yaml"):
+        for path, name, expected_type in asset_paths(token):
+            expected = manifest["files"][name]
+            for alias in (path, "/" + name):
+                for method in ("GET", "HEAD"):
+                    request = urllib.request.Request(origin + alias, method=method)
+                    with opener.open(request, timeout=20) as response:
+                        if (response.status != 200 or response.headers.get("Cache-Control") != "no-store"
+                                or response.headers.get("Referrer-Policy") != "no-referrer"
+                                or response.headers.get("X-Content-Type-Options") != "nosniff"):
+                            raise ValueError("invalid asset response")
+                        if response.headers.get_content_type() != expected_type:
+                            raise ValueError("unexpected asset MIME type")
+                        if method == "GET":
+                            digest = hashlib.sha256()
+                            total = 0
+                            while True:
+                                chunk = response.read(65536)
+                                if not chunk:
+                                    break
+                                total += len(chunk)
+                                if total > 128 * 1024 * 1024:
+                                    raise ValueError("published asset too large")
+                                digest.update(chunk)
+                            if digest.hexdigest() != expected:
+                                raise ValueError("served asset differs from revision")
+                checked += 1
+        for path in ("/", "/manifest.json", "/current/", "/sub/" + token + "/", "/sub/" + "0" * 48 + "/clash.yaml",
+                     "/" + token + "/", "/" + token + "/rules/unknown", "/" + "0" * 48 + "/clash",
+                     "/" + token + "/quantumult-x/../clash", "/" + token + "/clash?extra=1"):
             try:
                 opener.open(origin + path, timeout=20).close()
             except urllib.error.HTTPError as error:
@@ -244,10 +247,11 @@ def main(argv=None):
                         raise ValueError("subscription links belong to the hub: " + hub_origin)
                     if args.user not in state["users"]:
                         raise ValueError("unknown user")
-                    url = store.settings(state).origin + "/sub/" + state["users"][args.user]["token"] + "/"
-                    for label, suffix in (("Mihomo / Clash Meta", "clash.yaml"), ("QX 节点", "qx/nodes.txt"),
-                                          ("QX 完整配置（iOS 待验证）", "qx/full.conf"), ("QX 规则", "qx/rules.list")):
-                        print((label + ": " if args.labelled else "") + url + suffix)
+                    paths = asset_paths(state["users"][args.user]["token"])
+                    labels = ("Mihomo / Clash Meta", "Quantumult X 完整配置（iOS 待验证）",
+                              "Quantumult X 节点", "Quantumult X 规则")
+                    for label, (path, _, _) in zip(labels, paths):
+                        print((label + ": " if args.labelled else "") + store.settings(state).origin + path)
                 else:
                     result = store.health()
                     if args.command == "status":

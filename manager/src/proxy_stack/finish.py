@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .cli import NoRedirect
 from .storage import Store
+from .routes import asset_paths
 
 
 ATTEMPT_SECONDS = 4
@@ -47,9 +48,9 @@ def snapshot(store):
         result['local_required'] = bool(settings.local_node and local.get('enabled'))
         result['local_ready'] = bool(local.get('ready') and local.get('acked') == local.get('desired')
                                      and 0 <= now - beats.get('local', 0) < settings.lease_seconds)
-        name = 'sub/' + state['users']['owner']['token'] + '/clash.yaml'
+        path, name, _ = asset_paths(state['users']['owner']['token'])[0]
         manifest = store.read(store.current() / 'manifest.json')
-        result.update(url=settings.origin + '/' + name, expected=manifest['files'][name],
+        result.update(url=settings.origin + path, expected=manifest['files'][name],
                       rules=manifest['quality'])
         return result
 
@@ -178,7 +179,7 @@ def finish(store, wait=0, command='./proxyctl', https_only=False, silent=False):
         if result['ready']:
             print(f'订阅就绪：HTTPS 内容已校验；已确认节点 {nodes}。')
             print('Mihomo（私密）：' + result['url'])
-            print('QX / 其他链接：菜单「我的订阅」。')
+            print('Quantumult X / 其他链接：菜单「我的订阅」。')
         else:
             https = '已验证' if result.get('https') else '待验证'
             node = f'已确认 {nodes}' if nodes else '等待就绪节点回执'

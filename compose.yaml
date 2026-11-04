@@ -1,6 +1,6 @@
 name: proxy-stack
 x-tool: &tool
-  image: ${TOOL_IMAGE:-ghcr.io/silaswei/proxy-stack:v1.0.0}
+  image: ${TOOL_IMAGE:-ghcr.io/silaswei-io/proxy-stack:v1.0.0}
   build:
     context: .
     dockerfile: manager/Dockerfile

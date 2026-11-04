@@ -65,7 +65,7 @@ class FinishTests(unittest.TestCase):
         self.assertIn('订阅就绪：HTTPS 内容已校验；已确认节点 1', output)
         self.assertIn(self.store.state()['users']['owner']['token'], output)
         self.assertEqual(output.count('https://'), 1)
-        self.assertIn('QX / 其他链接', output)
+        self.assertIn('Quantumult X / 其他链接', output)
         self.assertLessEqual(len(output.splitlines()), 7)
 
     def test_failed_tls_offline_wrong_identity_and_headers_never_disclose(self):
@@ -107,7 +107,7 @@ class FinishTests(unittest.TestCase):
         self.opener.return_value.open.assert_called_once()
         request = self.opener.return_value.open.call_args.args[0]
         self.assertEqual(request.get_method(), 'GET')
-        self.assertTrue(request.full_url.startswith('https://proxy.example.com/sub/'))
+        self.assertEqual(request.full_url, 'https://proxy.example.com/' + self.store.state()['users']['owner']['token'] + '/clash')
         self.assertEqual(self.opener.return_value.open.call_args.kwargs, {'timeout': 2})
 
     def test_https_ready_but_pending_offline_removed_or_stale_generation_node(self):

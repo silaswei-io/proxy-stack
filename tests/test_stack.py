@@ -15,6 +15,7 @@ from unittest.mock import patch
 import yaml
 
 from proxy_stack import render, rules
+from proxy_stack.routes import asset_paths, PUBLIC_PATTERN
 from proxy_stack.cli import main
 from proxy_stack.cli import serve
 from proxy_stack.model import POLICY, Rule, Settings, groups, parse_entry, username
@@ -311,10 +312,12 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(node["servername"], self.settings.domain)
         self.assertEqual(node["ws-opts"]["headers"]["Host"], self.settings.domain)
         self.assertEqual(node["ws-opts"]["path"], self.state["ws_path"])
+        aliases = {path.lstrip("/"): name for path, name, _ in asset_paths("a" * 48)}
         for provider in clash["rule-providers"].values():
             path = provider["url"].removeprefix(self.settings.origin + "/")
-            self.assertIn(path, self.files)
-            self.assertTrue(yaml.safe_load(self.files[path])["payload"])
+            self.assertIn(path, aliases)
+            self.assertFalse(path.endswith(".yaml"))
+            self.assertTrue(yaml.safe_load(self.files[aliases[path]])["payload"])
         self.assertEqual(clash["rules"][-1], "MATCH,VPS")
         qx = self.files[self.base + "qx/full.conf"]
         self.assertFalse(qx.startswith("\ufeff"))
@@ -324,7 +327,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("static = VPS, Fixture VPS", qx)
         self.assertIn("final, VPS", qx)
         for path in re.findall(r"https://[^,\s]+", qx):
-            self.assertIn(path.removeprefix(self.settings.origin + "/"), self.files)
+            self.assertIn(path.removeprefix(self.settings.origin + "/"), aliases)
         nodes = self.files[self.base + "qx/nodes.txt"]
         for field in ("vless=proxy.example.com:443", "method=none", "obfs=wss", "obfs-host=proxy.example.com", "tls-verification=true", "tag=Fixture VPS"):
             self.assertIn(field, nodes)
@@ -342,6 +345,15 @@ class RenderTests(unittest.TestCase):
             self.assertIsNotNone(pattern.fullmatch("/" + path))
         for path in ("/sub/" + "a" * 48 + "/", "/manifest.json", "/releases/x/sub/x/clash.yaml", "/sub/" + "a" * 48 + "/qx/../clash.yaml"):
             self.assertIsNone(pattern.fullmatch(path))
+        public = re.compile(PUBLIC_PATTERN)
+        self.assertEqual(len(self.files), len(asset_paths("a" * 48)))
+        for path, name, mime in asset_paths("a" * 48):
+            self.assertIsNotNone(public.fullmatch(path))
+            self.assertIsNotNone(public.fullmatch("/" + name))
+            self.assertIn(name, self.files)
+        for suffix in ("", "clash.yaml", "quantumult-x/full.conf", "rules/unknown", "rules/proxy.yaml",
+                       "clash/", "quantumult-x/../clash", "clash?extra=1"):
+            self.assertIsNone(public.fullmatch("/" + "a" * 48 + "/" + suffix))
         hashes = {path: hashlib.sha256(text.encode()).hexdigest() for path, text in self.files.items()}
         self.assertEqual(hashes, json.loads((FIXTURES / "render-hashes.json").read_text()))
 

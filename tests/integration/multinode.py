@@ -59,7 +59,7 @@ def multinode_integration(root, network, containers):
     original = json.loads((data[0] / 'model/state.json').read_text())
     owner = original['users']['owner']
     token = owner['token']
-    central_link = 'https://hub.example.com:8443/sub/' + token + '/clash.yaml'
+    central_link = 'https://hub.example.com:8443/' + token + '/clash'
     assert json.loads((data[0] / 'public/current/sub' / token / 'clash.yaml').read_text())['proxies'] == []
     assert 'REJECT' in (data[0] / 'public/current/sub' / token / 'clash.yaml').read_text()
 
@@ -254,6 +254,7 @@ os.execv('/usr/local/bin/xray',['xray']+args)
     docker('stop', api)
     manager(0, 'user', 'revoke', 'alice')
     assert https(0, '/sub/' + alice['token'] + '/clash.yaml')[0] == 404
+    assert https(0, '/' + alice['token'] + '/clash')[0] == 404
     assert any(n['status'] == 'pending' for n in statuses())
     until(lambda: all(n['status'] == 'offline' for n in statuses()), 'offline state not reported', timeout=20)
     until(lambda: all(not json.loads((data[i] / 'runtime/node-status.json').read_text())['running'] for i in (1, 2)),

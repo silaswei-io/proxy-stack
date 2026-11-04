@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   publish:
-    if: github.repository == 'silaswei/proxy-stack' && github.ref == 'refs/heads/main'
+    if: github.repository == 'silaswei-io/proxy-stack' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,9 +34,9 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/silaswei/proxy-stack:sha-${{ github.sha }}
+            ghcr.io/silaswei-io/proxy-stack:sha-${{ github.sha }}
           labels: |
-            org.opencontainers.image.source=https://github.com/silaswei/proxy-stack
+            org.opencontainers.image.source=https://github.com/silaswei-io/proxy-stack
             org.opencontainers.image.version=v1.0.0
             org.opencontainers.image.revision=${{ github.sha }}
       - name: Advance v1.0.0 only for the current main revision
@@ -48,5 +48,5 @@ jobs:
             echo "A newer main revision exists; immutable revision retained, v1.0.0 unchanged."
             exit 0
           fi
-          docker buildx imagetools create --tag ghcr.io/silaswei/proxy-stack:v1.0.0 \
-            "ghcr.io/silaswei/proxy-stack:sha-$EXPECTED_SHA"
+          docker buildx imagetools create --tag ghcr.io/silaswei-io/proxy-stack:v1.0.0 \
+            "ghcr.io/silaswei-io/proxy-stack:sha-$EXPECTED_SHA"
