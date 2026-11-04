@@ -22,7 +22,9 @@ from proxy_stack.installer import script
 FAKE_DOCKER = r'''
 import json, os, sys
 from pathlib import Path
-from proxy_stack.cli import main
+def main(argv):
+    from proxy_stack.cli import main as cli_main
+    return cli_main(argv)
 args = sys.argv[1:]
 with open(os.environ['FAKE_DOCKER_LOG'], 'a') as log:
     log.write(json.dumps(args) + '\n')
@@ -223,12 +225,12 @@ class InstallerTests(unittest.TestCase):
                         FAKE_DOCKER_LOG=str(self.log), FAKE_HTTPS_READY='1', FAKE_ACK='1')
         self.payload = script()
 
-    def install(self, *args, inputs=True, env=None):
+    def install(self, *args, inputs=True, env=None, timeout=15):
         command = ["bash", "-s", "--", "--directory", str(self.destination), "--non-interactive"]
         if inputs:
             command += ["--domain", "Proxy.Example.com", "--name", "测试 VPS", "--port", "34567"]
         return subprocess.run(command + list(args), input=self.payload, text=True, capture_output=True,
-                              env=env or self.env, start_new_session=True, timeout=15)
+                              env=env or self.env, start_new_session=True, timeout=timeout)
 
     def calls(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()]
@@ -759,7 +761,9 @@ class InstallerTests(unittest.TestCase):
         self.assertFalse(self.destination.exists())
         self.assertIn('预检后被占用', result.stderr)
         self.log.write_text('')
-        result = self.install(inputs=False, env=dict(self.env, FAKE_BUSY_ALL_HIGH='1'))
+        # Exhausting all 24 probes launches 48 fake Docker processes. Allow
+        # slower CI runners to finish the bounded search and assert its result.
+        result = self.install(inputs=False, env=dict(self.env, FAKE_BUSY_ALL_HIGH='1'), timeout=60)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('24 次', result.stderr)
         self.assertFalse(self.destination.exists())
