@@ -364,7 +364,10 @@ class RuntimeTests(unittest.TestCase):
             try:
                 self.assertTrue(entered.wait(1))
                 deadline = time.monotonic()+1
-                while self.supervisor.alive() and time.monotonic()<deadline:
+                # Stopping the child and publishing its status are sequential
+                # watchdog actions; observe both within the same deadline.
+                while time.monotonic()<deadline and (self.supervisor.alive() or
+                        self.store.read(self.store.runtime/'node-status.json')['running']):
                     time.sleep(.02)
                 self.assertFalse(self.supervisor.alive())
                 self.assertTrue(poller.is_alive())
