@@ -1,0 +1,21 @@
+name: test
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build tool image
+        run: docker build -t proxy-stack-tool:0.1.0 -f manager/Dockerfile .
+      - name: Offline unit and regression tests
+        run: docker run --rm --entrypoint python -v "$PWD/tests:/tests:ro" proxy-stack-tool:0.1.0 -m unittest discover -s /tests -v
+      - name: Check both Compose layouts
+        env:
+          DOMAIN: proxy.example.com
+        run: |
+          docker compose config --quiet
+          docker compose -f compose.yaml -f compose.external.yaml config --quiet
+      - name: Native configuration, HTTP, TLS and VLESS integration
+        run: python3 tests/integration/run.py

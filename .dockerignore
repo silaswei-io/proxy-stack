@@ -1,0 +1,8 @@
+**
+!manager/
+!manager/Dockerfile
+!manager/requirements.txt
+!manager/src/
+!manager/src/proxy_stack/
+!manager/src/proxy_stack/*.py
+!manager/src/proxy_stack/bootstrap.json

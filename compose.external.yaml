@@ -1,0 +1,6 @@
+# Requires Docker Compose >= 2.24.4 for !override. Replaces, never appends, ports.
+services:
+  caddy:
+    command: [caddy, run, --config, /etc/caddy/external.Caddyfile, --adapter, caddyfile]
+    ports: !override
+      - "127.0.0.1:18090:8080"

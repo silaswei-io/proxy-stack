@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+cd -- "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+command -v docker >/dev/null 2>&1 || { echo "Docker is required" >&2; exit 1; }
+cmd=${1:-help}
+if [ "$#" -gt 0 ]; then shift; fi
+case "$cmd" in
+  init|links|verify|update-rules)
+    docker compose run --rm --no-deps manager "$cmd" "$@"
+    ;;
+  status)
+    docker compose run --rm --no-deps manager status "$@"
+    docker compose ps
+    ;;
+  user)
+    # The manager has no Docker access; only this operator wrapper restarts Xray.
+    docker compose run --rm --no-deps manager user "$@"
+    if [ -n "$(docker compose ps -q --status running xray)" ]; then
+      docker compose restart xray
+    else
+      echo "Xray is stopped; the next up will load the new users."
+    fi
+    ;;
+  up)
+    docker compose run --rm --no-deps manager health >/dev/null
+    docker compose up -d "$@"
+    ;;
+  down)
+    [ "$#" -eq 0 ] || { echo "down takes no options; data and certificates are retained" >&2; exit 2; }
+    docker compose down
+    ;;
+  *)
+    echo "Usage: ./proxyctl {init|links [--user NAME]|status|verify|update-rules|user add/revoke NAME|up|down}"
+    exit 2
+    ;;
+esac
