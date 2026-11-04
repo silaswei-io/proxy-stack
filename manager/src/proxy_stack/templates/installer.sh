@@ -67,6 +67,7 @@ while [ -n "$component" ]; do
   component=${component%/*}
 done
 marker=.proxy-stack-managed
+# EXPORT_HOST_HELPER
 # Normal reruns discover interrupted journals. Never execute a user-writable or
 # symlinked recovery program, and never recover another live installer.
 recover_previous() {
@@ -89,6 +90,29 @@ recover_previous() {
     [ "$current_start" != "$owner_start" ] || fail '另一个安装事务仍在运行。'
   fi
   if $check_only; then fail '检测到未完成事务；请先用相同 --directory 和 --recover 恢复（本次检查未写入）。'; fi
+  # Only known packaged bytes may be migrated. Keep the original helper intact
+  # for audit/retry, and never execute a helper supplied through a new path.
+  file="$previous/host_setup.py"
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -O "$file" ] && [ "$(stat -c '%a' "$file")" = 600 ] && [ "$(stat -c '%h' "$file")" = 1 ] || fail '恢复 helper 不安全。'
+  [ ! -L "$previous/operator.log" ] || fail '恢复日志不安全。'
+  local helper_hash current_hash backup temporary
+  helper_hash=$(sha256sum "$file" | cut -d' ' -f1)
+  current_hash=$(emit_host_helper | sha256sum | cut -d' ' -f1)
+  case "$helper_hash" in
+    "$current_hash") ;;
+    4e58b55786b068d5f664d6354b9b9a1219514f449a81d71c64aacbdfb31cbaee)
+      backup="$previous/host_setup.611082f.original.py"
+      if [ -e "$backup" ] || [ -L "$backup" ]; then
+        [ -f "$backup" ] && [ ! -L "$backup" ] && [ -O "$backup" ] && [ "$(stat -c '%a' "$backup")" = 600 ] && [ "$(stat -c '%h' "$backup")" = 1 ] && cmp -s "$file" "$backup" || fail '旧 helper 备份冲突；保留原文件。'
+      else
+        (set -o noclobber; cat "$file" > "$backup") || fail '无法保留旧 helper。'
+      fi
+      temporary=$(mktemp "$previous/.host-helper.XXXXXXXX") || fail '无法准备恢复 helper。'
+      emit_host_helper > "$temporary"
+      mv -- "$temporary" "$file"
+      ;;
+    *) fail '未知恢复 helper；未覆盖或执行，保留备份供人工审查。' ;;
+  esac
   printf '正在恢复上次未完成事务…\n'
   if ! bash "$previous/recover.sh" >>"$previous/operator.log" 2>&1; then
     fail "恢复尚未完成；保留私有状态和锁。日志：$previous/operator.log；重试 --recover。"
@@ -156,16 +180,22 @@ quiet() {
   printf '操作失败；诊断日志：%s\n' "$operator_log" >&2
   return 1
 }
-# A named, short-lived helper is the only preflight container mutation.
+# Named, short-lived helpers check collisions and the public-address roundtrip.
 probe_name=proxy-stack-port-check-$$-$RANDOM
-cleanup_probe() { timeout 5 docker rm -f "$probe_name" >/dev/null 2>&1 || :; }
+roundtrip_listener=proxy-stack-roundtrip-listener-$$-$RANDOM
+roundtrip_probe=proxy-stack-roundtrip-probe-$$-$RANDOM
+cleanup_roundtrip() { timeout 5 docker rm -f "$roundtrip_probe" "$roundtrip_listener" >/dev/null 2>&1 || :; }
+cleanup_port_probe() { timeout 5 docker rm -f "$probe_name" >/dev/null 2>&1 || :; }
+cleanup_probe() { cleanup_port_probe; cleanup_roundtrip; }
 trap cleanup_probe EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
 port_available() {
   if timeout 10 docker run --rm -d --name "$probe_name" --read-only --cap-drop=ALL --network bridge \
     -p "$1:8080" --entrypoint python "$tool_image" -c 'import time; time.sleep(60)' >/dev/null 2>&1; then
-    cleanup_probe; return 0
+    cleanup_port_probe; return 0
   fi
-  cleanup_probe; return 1
+  cleanup_port_probe; return 1
 }
 random_port() {
   local attempts candidate
@@ -188,6 +218,57 @@ owns_binding() {
     [ "$binding" != "$1/tcp $expected_ip $3" ] || return 0
   done <<< "$bindings"
   return 1
+}
+public_roundtrip() {
+  local nonce result=0
+  nonce=$(head -c 32 /dev/urandom | sha256sum | cut -d' ' -f1)
+  printf '验证所选 HTTPS 端口的公共地址回环（最多 30 秒；不代表外部入站可达）…\n'
+  if ! timeout 10 docker run --rm -d --name "$roundtrip_listener" --read-only --cap-drop=ALL --network bridge \
+    -p "$port:8080" -e "ROUNDTRIP_NONCE=$nonce" --entrypoint python "$tool_image" -c '
+import http.server, os, signal, time
+signal.signal(signal.SIGALRM, signal.SIG_DFL)
+signal.alarm(30)  # Absolute lifetime, including trickled request headers.
+class Server(http.server.HTTPServer):
+    def get_request(self):
+        connection, address = super().get_request()
+        connection.settimeout(2)
+        return connection, address
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = os.environ["ROUNDTRIP_NONCE"].encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args): pass
+server = Server(("0.0.0.0", 8080), Handler)
+server.timeout = 1
+until = time.monotonic() + 30
+while time.monotonic() < until: server.handle_request()
+server.server_close()
+' >>"$operator_log" 2>&1; then result=1
+  elif ! timeout 15 docker run --rm --name "$roundtrip_probe" --read-only --cap-drop=ALL --network bridge \
+    -e "ROUNDTRIP_NONCE=$nonce" -e "ROUNDTRIP_HOST=$domain" -e "ROUNDTRIP_PORT=$port" --entrypoint python "$tool_image" -c '
+import os, signal, time, urllib.request
+signal.signal(signal.SIGALRM, signal.SIG_DFL)
+signal.alarm(12)  # Includes DNS and reads; independent of the Docker CLI.
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args): return None
+host = os.environ["ROUNDTRIP_HOST"]
+if ":" in host: host = "[" + host + "]"
+url = "http://" + host + ":" + os.environ["ROUNDTRIP_PORT"] + "/"
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+for attempt in range(3):
+    try:
+        with opener.open(url, timeout=2) as response:
+            if response.status == 200 and response.read(65) == os.environ["ROUNDTRIP_NONCE"].encode():
+                raise SystemExit(0)
+    except Exception: pass
+    time.sleep(1)
+raise SystemExit(1)
+' >>"$operator_log" 2>&1; then result=1; fi
+  cleanup_roundtrip
+  return "$result"
 }
 prompt() {
   $non_interactive && fail "缺少 $1；无交互模式请提供显式参数。"
@@ -237,7 +318,11 @@ valid_port "$port" || fail '端口需为 1–65535 的数字。'; port=$((10#$po
 domain=$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]')
 domain=$(timeout 15 docker run --rm --read-only --cap-drop=ALL --network none -e "DOMAIN=$domain" -e "NODE_NAME=$node_name" -e "PUBLIC_PORT=$port" "$tool_image" validate-input 2>>"$operator_log") || fail '域名、公网 IP、名称或端口无效；安装目录未写入。'
 quiet timeout 20 docker run --rm --read-only --cap-drop=ALL --network bridge -e "DOMAIN=$domain" -e "NODE_NAME=$node_name" "$tool_image" check-address || fail '地址映射预检失败；安装目录未写入。'
-if ! port_available "$port" && ! owns_binding "$port" 0.0.0.0 "$port" && ! owns_binding "$port" :: "$port"; then fail "公共 HTTPS 端口 $port 已占用；安装目录未写入。"; fi
+if port_available "$port"; then
+  if ! $prepare_only; then public_roundtrip || fail "所选 HTTPS 端口 $port 的公共地址回环失败；检查防火墙/云安全组、NAT/回环支持。原安装和宿主配置未改变。日志：$operator_log"; fi
+elif owns_binding "$port" 0.0.0.0 "$port" || owns_binding "$port" :: "$port"; then
+  printf '精确受管 Caddy 已占用所选端口；跳过临时监听，仍须完成 HTTPS 验证。\n'
+else fail "公共 HTTPS 端口 $port 已占用；安装目录未写入。"; fi
 if [ "$mode" = existing-caddy ]; then
   $prepare_only || fail 'existing-caddy 仅供专家 --prepare-only；正常安装请使用 auto。'
   port_available 127.0.0.1:18090 || owns_binding 8080 127.0.0.1 18090 || fail '回环 18090 已占用；安装目录未写入。'
@@ -257,7 +342,7 @@ fi
 mkdir "$stage/install"
 cd -- "$stage/install"
 # EXPORT_TEMPLATES
-# EXPORT_HOST_HELPER
+emit_host_helper > host_setup.py
 chmod 700 proxyctl
 if $repeat; then
   mkdir "$stage/original-install"
@@ -471,6 +556,13 @@ rollback_on_exit() {
   if $committed; then
     if [ -f "$directory.install-lock/owner" ] && [ "$(cat "$directory.install-lock/owner")" = "$stage" ]; then rm -f -- "$directory.install-lock/owner"; rmdir -- "$directory.install-lock"; fi
   else
+    # Capture only this transaction's Caddy diagnostics BEFORE recovery removes
+    # its container. Never stream these potentially sensitive bytes to the UI.
+    if [ -f "$stage/resources-starting" ] && [ -f "$directory/.env" ] && [ -f "$stage/env.sha256" ] && \
+       [ "$(sha256sum "$directory/.env" | cut -d' ' -f1)" = "$(cat "$stage/env.sha256")" ]; then
+      (cd -- "$directory" && timeout 10 docker compose --project-name "$project" logs --no-color --tail 200 caddy) > "$stage/caddy-diagnostics.log" 2>&1 || :
+      chmod 600 "$stage/caddy-diagnostics.log"
+    fi
     if bash "$stage/recover.sh" >>"$operator_log" 2>&1; then
       printf '安装未完成；本次变更已回滚。备份/日志：%s\n' "$stage" >&2
     else
@@ -553,7 +645,12 @@ else
   if $host_route; then timeout 45 python3 "$stage/host_setup.py" apply --stage "$stage/host" || fail '宿主路由激活失败。'; fi
   # Completion is separate from usability: a hub-only can bootstrap enrollment.
   printf '等待公共 HTTPS 验证（最多 120 秒；不会提前显示私密链接）…\n'
-  timeout 130 "$directory/proxyctl" finish --wait 120 --https-only --silent || fail '公共 HTTPS / 节点运行同步待完成；回滚本次配置和资源，保留原服务。'
+  if timeout 120 "$directory/proxyctl" finish --wait 120 --https-only --silent --progress; then :
+  else
+    finish_status=$?
+    if [ "$finish_status" -eq 124 ]; then printf '完成检查失败（timeout）：120 秒上限已到；根据上方进度分类检查本机状态、服务、HTTPS 或节点同步。\n' >&2; fi
+    fail '公共 HTTPS / 节点运行同步待完成；回滚本次配置和资源，保留原服务。'
+  fi
   committed=true; printf 'complete\n' > phase
   "$directory/proxyctl" finish || :
 fi

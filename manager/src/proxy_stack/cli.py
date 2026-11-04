@@ -115,6 +115,7 @@ def main(argv=None):
     finish_parser.add_argument("--wait", type=int, choices=range(0, 121), default=0, metavar="0..120")
     finish_parser.add_argument("--https-only", action="store_true", help=argparse.SUPPRESS)
     finish_parser.add_argument("--silent", action="store_true", help=argparse.SUPPRESS)
+    finish_parser.add_argument("--progress", action="store_true", help=argparse.SUPPRESS)
     finish_parser.add_argument("--command", dest="display_command", default="./proxyctl", help=argparse.SUPPRESS)
     sub.add_parser("status")
     sub.add_parser("health")
@@ -234,7 +235,7 @@ def main(argv=None):
                 serve(store, Settings.from_env().interval)
         elif args.command == "finish":
             from .finish import finish
-            return finish(store, args.wait, args.display_command, args.https_only, args.silent)
+            return finish(store, args.wait, args.display_command, args.https_only, args.silent, args.progress)
         elif args.command == "verify":
             print(json.dumps(verify(store, args.base_url), ensure_ascii=False))
         else:

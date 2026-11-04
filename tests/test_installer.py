@@ -5,8 +5,10 @@ No daemon, host ports, upstream downloads or real credentials are used here.
 import json
 import os
 import pty
+import re
 import select
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -71,6 +73,25 @@ def patch_control():
                 raise urllib.error.HTTPError(origin,403,'unauthorized',None,None)
         control.request = local_request
 if args[0] == 'run':
+    # Explicit boundary: never send the fixture's public IP to a network.
+    # Both halves must carry the same nonce and run on separate bridge containers.
+    if any(a.startswith('ROUNDTRIP_') for a in args):
+        values = dict(args[i+1].split('=', 1) for i, a in enumerate(args) if a == '-e')
+        name = args[args.index('--name')+1]
+        assert args[args.index('--network')+1] == 'bridge'
+        nonce_file = Path(os.environ['FAKE_DOCKER_LOG'] + '.nonce')
+        if '-p' in args:
+            assert name.startswith('proxy-stack-roundtrip-listener-')
+            nonce_file.write_text(values['ROUNDTRIP_NONCE'])
+            if os.environ.get('FAKE_ROUNDTRIP_PAUSE'):
+                import time
+                time.sleep(30)
+            sys.exit(0)
+        assert name.startswith('proxy-stack-roundtrip-probe-')
+        assert nonce_file.read_text() == values['ROUNDTRIP_NONCE']
+        assert values['ROUNDTRIP_HOST']
+        assert values['ROUNDTRIP_PORT'].isdigit()
+        sys.exit(int(os.environ.get('FAKE_ROUNDTRIP_FAIL', '0')))
     if any(arg.startswith('caddy:2.11.4@sha256:') for arg in args):
         sys.exit(int(os.environ.get('FAKE_CANDIDATE_FAIL', '0')))
     if args[-1] == 'check-address':
@@ -130,11 +151,13 @@ if args[1] == 'run':
         main(['init'])
         sys.exit(1)
     if 'finish' in args:
+        if os.environ.get('FAKE_FINISH_OUTER_TIMEOUT'):
+            sys.exit(124)
         from proxy_stack import finish
         from email.message import Message
         import io
         original_check = finish.check
-        finish.check = lambda root, wait, https_only=False: original_check(root, 0, https_only)
+        finish.check = lambda root, wait, https_only=False, **kwargs: original_check(root, 0, https_only, **kwargs)
         class Response(io.BytesIO):
             status = 200
             headers = Message()
@@ -173,6 +196,10 @@ if args[1] == 'run':
         update = Store.update
         Store.update = lambda self: update(self, lambda name: bootstrap()['lists'][name])
     sys.exit(main(args[args.index('manager') + 1:]))
+if args[1] == '--project-name' and 'logs' in args:
+    assert args[-1] == 'caddy' and '--tail' in args
+    print('fake scoped Caddy certificate diagnostic')
+    sys.exit(0)
 if args[1] == 'up':
     if os.environ.get('FAKE_UP_PAUSE'):
         import time
@@ -204,6 +231,56 @@ if args[1] == 'ps' and '-q' in args:
     print('a' * 64 if os.environ.get('FAKE_OWNED_CADDY') else 'fake-running-xray')
 sys.exit(0)
 '''
+
+
+@unittest.skipUnless(sys.platform == 'linux', 'temporary containers run Linux')
+class NonceDeadlineTests(unittest.TestCase):
+    def code(self, seconds):
+        return next(code for code in re.findall(
+            r"--entrypoint python \"\$tool_image\" -c '\n(.*?)\n'", script(), re.S)
+                    if 'signal.alarm(' + str(seconds) + ')' in code)
+
+    def test_extracted_listener_expires_despite_trickled_headers(self):
+        started = time.monotonic()
+        process = subprocess.Popen([sys.executable, '-c', self.code(30)],
+                                   env=dict(os.environ, ROUNDTRIP_NONCE='a' * 64),
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        connection = None
+        try:
+            while time.monotonic() - started < 3:
+                try:
+                    connection = socket.create_connection(('127.0.0.1', 8080), timeout=.5)
+                    break
+                except ConnectionRefusedError:
+                    if process.poll() is not None:
+                        self.fail('listener exited before accepting a connection')
+                    time.sleep(.02)
+            self.assertIsNotNone(connection)
+            connection.sendall(b'GET / HTTP/1.1\r\nX-Trickle: ')
+            # Every byte arrives within the two-second socket idle cap.
+            while process.poll() is None and time.monotonic() - started < 33:
+                try:
+                    connection.sendall(b'a')
+                except OSError:
+                    break
+                time.sleep(.2)
+            self.assertEqual(process.wait(timeout=2), -signal.SIGALRM)
+            self.assertLess(time.monotonic() - started, 33)
+        finally:
+            if connection:
+                connection.close()
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+
+    def test_extracted_probe_expires_during_blocked_dns(self):
+        started = time.monotonic()
+        result = subprocess.run([sys.executable, '-c',
+                                 'import socket, time\nsocket.getaddrinfo = lambda *a, **k: time.sleep(60)\n' + self.code(12)],
+                                env=dict(os.environ, ROUNDTRIP_HOST='nonce.invalid', ROUNDTRIP_PORT='8080',
+                                         ROUNDTRIP_NONCE='a' * 64), capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, -signal.SIGALRM)
+        self.assertLess(time.monotonic() - started, 15)
 
 
 class InstallerTests(unittest.TestCase):
@@ -276,6 +353,12 @@ class InstallerTests(unittest.TestCase):
         # The secret links are only stdout, never command arguments/ordinary logs.
         self.assertNotIn(state["users"]["owner"]["token"], self.log.read_text())
         self.assertNotIn(state["users"]["owner"]["token"], result.stderr)
+
+    def test_completion_outer_timeout_uses_phase_neutral_diagnosis(self):
+        result = self.install(env=dict(self.env, FAKE_FINISH_OUTER_TIMEOUT='1'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('120 秒上限已到；根据上方进度分类检查本机状态', result.stderr)
+        self.assertNotIn('120 秒上限已到；检查所选 HTTPS 端口的云防火墙', result.stderr)
 
     def test_hub_only_pending_nodes_is_quiet_and_private_logs_retain_docker_errors(self):
         result = self.install('--role', 'hub-only')
@@ -720,9 +803,11 @@ class InstallerTests(unittest.TestCase):
         host_root = self.root / 'host'
         host = HostFixture(host_root)
         wrapper = self.bin / 'python3'
-        wrapper.write_text('#!' + sys.executable + '\nimport sys\nsys.path.insert(0, ' + repr(str(Path(__file__).parent)) + ')\n'
+        wrapper.write_text('#!' + sys.executable + '\nimport sys,importlib.util\nsys.path.insert(0, ' + repr(str(Path(__file__).parent)) + ')\n'
                            'from test_host_setup import fixture_main\n'
-                           'sys.exit(fixture_main(' + repr(str(host_root)) + ', sys.argv[2:]))\n')
+                           'spec=importlib.util.spec_from_file_location("transaction_helper",sys.argv[1])\n'
+                           'helper=importlib.util.module_from_spec(spec);spec.loader.exec_module(helper)\n'
+                           'sys.exit(fixture_main(' + repr(str(host_root)) + ', sys.argv[2:],helper))\n')
         wrapper.chmod(0o700)
         return host
 
@@ -784,6 +869,70 @@ class InstallerTests(unittest.TestCase):
         self.assertFalse(self.destination.exists())
         self.assertEqual(host.config.read_bytes(), original)
 
+    def legacy_recovery(self):
+        host = self.fake_host()
+        result = self.install('--manage-host-caddy',
+                              env=dict(self.env, FAKE_BUSY_PORTS='80', FAKE_HOST_RELOAD_FAIL='1'))
+        self.assertNotEqual(result.returncode, 0)
+        lock = Path(str(self.destination) + '.install-lock')
+        stage = Path((lock / 'owner').read_text().strip())
+        self.assertEqual((stage / 'phase').read_text().strip(), 'recovery-required')
+        legacy = (Path(__file__).parent / 'fixtures/host_setup-611082f.py').read_bytes()
+        import hashlib
+        self.assertEqual(hashlib.sha256(legacy).hexdigest(), '4e58b55786b068d5f664d6354b9b9a1219514f449a81d71c64aacbdfb31cbaee')
+        (stage / 'host_setup.py').write_bytes(legacy)
+        journal = stage / 'host/journal.json'
+        value = json.loads(journal.read_text())
+        value['service']['service'] = dict(host.info)  # original raw systemctl strings
+        journal.write_text(json.dumps(value))
+        return host, stage, lock, legacy
+
+    def test_current_recover_migrates_exact_legacy_helper_retains_bytes_and_checks_drift(self):
+        host, stage, lock, legacy = self.legacy_recovery()
+        # Reproduce the original failure using the actual old embedded helper.
+        old = subprocess.run([str(self.bin / 'python3'), str(stage / 'host_setup.py'),
+                              'rollback', '--stage', str(stage / 'host')],
+                             env=self.env, text=True, capture_output=True, timeout=10)
+        self.assertNotEqual(old.returncode, 0)
+        self.assertIn('外部 unit 变更', old.stderr)
+        original_unit = host.unit.read_bytes()
+        host.unit.write_bytes(original_unit + b'# external drift\n')
+        result = self.install('--recover', inputs=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(lock.exists())
+        self.assertTrue((stage / 'host/original').exists())
+        self.assertEqual((stage / 'host_setup.611082f.original.py').read_bytes(), legacy)
+        self.assertEqual((stage / 'host_setup.py').read_bytes(), files('proxy_stack').joinpath('host_setup.py').read_bytes())
+        host.unit.write_bytes(original_unit)
+        self.assert_ok(self.install('--recover', inputs=False))
+        self.assertFalse(lock.exists())
+        self.assertFalse(self.destination.exists())
+        self.assertEqual((stage / 'phase').read_text().strip(), 'rolled-back')
+        self.assertEqual(json.loads((stage / 'host/journal.json').read_text())['phase'], 'rolled-back')
+        self.assertEqual((stage / 'host_setup.611082f.original.py').read_bytes(), legacy)
+
+    def test_recovery_refuses_unknown_symlink_helper_and_conflicting_backup(self):
+        host, stage, lock, legacy = self.legacy_recovery()
+        helper = stage / 'host_setup.py'
+        helper.write_bytes(legacy + b'\nraise RuntimeError("untrusted helper executed")\n')
+        result = self.install('--recover', inputs=False)
+        self.assertIn('未知恢复 helper', result.stderr)
+        self.assertEqual(helper.read_bytes(), legacy + b'\nraise RuntimeError("untrusted helper executed")\n')
+        helper.unlink()
+        helper.symlink_to(stage / 'install/host_setup.py')
+        result = self.install('--recover', inputs=False)
+        self.assertIn('helper 不安全', result.stderr)
+        helper.unlink()
+        helper.write_bytes(legacy)
+        helper.chmod(0o600)
+        backup = stage / 'host_setup.611082f.original.py'
+        backup.write_bytes(b'unknown backup')
+        result = self.install('--recover', inputs=False)
+        self.assertIn('备份冲突', result.stderr)
+        self.assertEqual(helper.read_bytes(), legacy)
+        self.assertEqual(backup.read_bytes(), b'unknown backup')
+        self.assertTrue(lock.exists())
+
     def test_only_443_busy_needs_no_host_integration_and_explicit_port_conflicts_fail(self):
         result = self.install('--check', env=dict(self.env, FAKE_BUSY_PORTS='443'))
         self.assert_ok(result)
@@ -816,6 +965,57 @@ class InstallerTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.destination.exists())
 
+    def test_public_roundtrip_failure_is_early_cleans_both_and_preserves_original(self):
+        host = self.fake_host()
+        original = host.config.read_bytes()
+        for args in (('--port', '34567'), ()):
+            self.log.write_text('')
+            result = self.install('--check', *args, inputs=bool(args),
+                                  env=dict(self.env, FAKE_ROUNDTRIP_FAIL='1', FAKE_BUSY_PORTS='80'))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('公共地址回环失败', result.stderr)
+            self.assertIn('NAT', result.stderr)
+            self.assertFalse(self.destination.exists())
+            self.assertFalse(Path(str(self.destination) + '.install-lock').exists())
+            self.assertEqual(host.config.read_bytes(), original)
+            self.assertFalse(host.events.exists())
+            calls = self.calls()
+            checks = [c for c in calls if any(a.startswith('ROUNDTRIP_HOST=') for a in c)]
+            self.assertEqual(len(checks), 1)  # never scan for another reachable port
+            names = [c[c.index('--name') + 1] for c in calls if c[0] == 'run' and any(a.startswith('ROUNDTRIP_NONCE=') for a in c)]
+            self.assertEqual(len(names), 2)
+            self.assertTrue(any(c[:2] == ['rm', '-f'] and all(n in c for n in names) for c in calls))
+            self.assertFalse(any('init' in c or 'up' in c or 'preview-caddy' in c for c in calls))
+        self.assert_ok(self.install('--prepare-only'))
+        before = (self.destination / 'data/model/state.json').read_bytes()
+        result = self.install('--port', '45678', env=dict(self.env, FAKE_ROUNDTRIP_FAIL='1'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.destination / 'data/model/state.json').read_bytes(), before)
+
+    def test_roundtrip_interruption_cleans_listener_and_probe_before_mutation(self):
+        installer = self.root / 'installer.sh'
+        installer.write_text(self.payload)
+        process = subprocess.Popen(['bash', str(installer), '--directory', str(self.destination),
+                                    '--non-interactive', '--domain', '8.8.8.8', '--port', '34567'],
+                                   env=dict(self.env, FAKE_ROUNDTRIP_PAUSE='1'), start_new_session=True,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                if self.log.exists() and any(any(a.startswith('ROUNDTRIP_NONCE=') for a in c) for c in self.calls()):
+                    break
+                time.sleep(.03)
+            else: self.fail('listener did not start')
+            os.killpg(process.pid, signal.SIGTERM)
+            process.wait(timeout=15)
+            self.assertNotEqual(process.returncode, 0)
+            self.assertFalse(self.destination.exists())
+            self.assertTrue(any(c[:2] == ['rm', '-f'] and any('roundtrip-listener-' in a for a in c)
+                                and any('roundtrip-probe-' in a for a in c) for c in self.calls()))
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=2)
     def test_port_recheck_and_bounded_random_failure_leave_no_install(self):
         result = self.install(env=dict(self.env, FAKE_RACE_PORT='34567'))
         self.assertNotEqual(result.returncode, 0)
@@ -869,6 +1069,15 @@ class InstallerTests(unittest.TestCase):
         self.assertIn('节点运行同步待完成', result.stderr)
         self.assertFalse(self.destination.exists())
         self.assertNotIn('/sub/', result.stdout + result.stderr)
+        self.assertIn('失败（node）', result.stdout)
+        stage = Path(result.stderr.split('备份/日志：')[1].strip())
+        diagnostics = stage / 'caddy-diagnostics.log'
+        self.assertEqual(diagnostics.stat().st_mode & 0o777, 0o600)
+        self.assertIn('fake scoped Caddy certificate diagnostic', diagnostics.read_text())
+        self.assertNotIn('fake scoped', result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertLess(next(i for i, c in enumerate(calls) if 'logs' in c),
+                        next(i for i, c in enumerate(calls) if 'down' in c))
 
     def test_rootless_remote_and_nonlinux_fail_before_install_writes(self):
         for changes in ({'FAKE_DOCKER_ENDPOINT': 'ssh://elsewhere'}, {'FAKE_DOCKER_SECURITY': '["name=rootless"]'}):
@@ -893,6 +1102,23 @@ class InstallerTests(unittest.TestCase):
                                        FAKE_BINDINGS='34567/tcp :: 34567\n80/tcp :: 80'))
         self.assert_ok(result)
         self.assertIn('HTTP-01 [::]:80', result.stdout)
+        self.assertNotIn('ROUNDTRIP_NONCE=', self.log.read_text())
+
+    def test_owned_binding_skips_listener_but_completion_is_still_required(self):
+        self.assert_ok(self.install('--prepare-only'))
+        before = (self.destination / 'data/model/state.json').read_bytes()
+        self.log.write_text('')
+        result = self.install(inputs=False, env=dict(self.env, FAKE_OWNED_CADDY='1',
+                              FAKE_OWNED_DIRECTORY=str(self.destination), FAKE_BUSY_PORTS='34567,80',
+                              FAKE_BINDINGS='34567/tcp 0.0.0.0 34567\n80/tcp 0.0.0.0 80', FAKE_HTTPS_READY='0'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('跳过临时监听', result.stdout)
+        self.assertIn('失败（connect）', result.stdout)
+        self.assertNotIn('ROUNDTRIP_NONCE=', self.log.read_text())
+        self.assertTrue(any('finish' in c for c in self.calls()))
+        after = json.loads((self.destination / 'data/model/state.json').read_text())
+        for key in ('users', 'ws_path', 'settings'):
+            self.assertEqual(after[key], json.loads(before)[key])
 
     def test_killed_installer_normal_rerun_and_recover_discover_journal(self):
         installer = self.root / 'installer.sh'

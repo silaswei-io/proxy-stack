@@ -30,6 +30,34 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def command_identity(spec):
+    """systemctl show includes execution timestamps/PIDs even for reload.
+
+    Accept old journals containing the raw string as well as new fingerprints.
+    Only the executable, argv and ignore_errors describe the configured command.
+    """
+    if isinstance(spec, dict):
+        if (set(spec) == {'path', 'argv', 'ignore_errors'} and
+                isinstance(spec['path'], str) and isinstance(spec['argv'], list) and
+                all(isinstance(arg, str) for arg in spec['argv']) and
+                spec['ignore_errors'] in ('yes', 'no')):
+            return spec
+        raise Refused('systemd 命令指纹无效')
+    match = re.fullmatch(r'\{ path=([^{};]+?) ; argv\[\]=([^{}]*?) ; ignore_errors=(yes|no)(?: ; [^{}]*)? \}', spec or '')
+    if not match:
+        raise Refused('无法确认单一 systemd 命令身份')
+    return {'path': match[1], 'argv': shlex.split(match[2]), 'ignore_errors': match[3]}
+
+
+def service_identity(value):
+    result = dict(value)
+    info = dict(result['service'])
+    for key in ('ExecStart', 'ExecReload'):
+        info[key] = command_identity(info.get(key))
+    result['service'] = info
+    return result
+
+
 def atomic(path, data, mode=0o600, uid=None, gid=None):
     path = Path(path)
     temporary = path.with_name('.' + path.name + '.proxy-stack-' + os.urandom(8).hex())
@@ -216,11 +244,10 @@ class Host:
         if uid != user.pw_uid:
             raise Refused('Caddy 进程用户不匹配')
         for key in ('ExecStart', 'ExecReload'):
-            spec = info.get(key, '')
-            match = re.search(r'argv\[\]=(.*?) ;', spec)
-            if not match or 'path=' + str(binary) + ' ' not in spec:
+            spec = command_identity(info.get(key))
+            if spec['path'] != str(binary):
                 raise Refused('不支持此 systemd 启动/重载命令')
-            command = shlex.split(match[1])
+            command = spec['argv']
             if key == 'ExecStart':
                 if command != args:
                     raise Refused('systemd 启动参数与实际进程不匹配')
@@ -244,9 +271,9 @@ class Host:
         match = re.match(r'v?2\.(\d+)\.', version)
         if not match or int(match[1]) < 6:
             raise Refused('自动 HTTP-01 集成需要 stock Caddy >= 2.6')
-        return {'pid': pid, 'binary': str(binary), 'config': str(config), 'version': version,
+        return service_identity({'pid': pid, 'binary': str(binary), 'config': str(config), 'version': version,
                 'unit': str(unit), 'unit_hash': digest(unit.read_bytes()),
-                'binary_hash': digest(binary.read_bytes()), 'service': info}
+                'binary_hash': digest(binary.read_bytes()), 'service': info})
 
     def files(self, config):
         found, patterns = {}, {}
@@ -416,7 +443,7 @@ def plan(host, stage, domain, port, identity):
 def recheck(host, value):
     if digest(json.dumps(host.active(), sort_keys=True).encode()) != value['active_hash']:
         raise Refused('宿主运行配置在预检后已改变')
-    if host.service() != value['service'] or host.files(value['service']['config']) != value['dependencies']:
+    if service_identity(host.service()) != service_identity(value['service']) or host.files(value['service']['config']) != value['dependencies']:
         raise Refused('宿主配置/监听者在预检后已改变；未应用计划')
 
 
@@ -449,10 +476,14 @@ def rollback(host, stage):
     if value['phase'] in ('planned', 'unchanged', 'rolled-back'):
         return
     info = host.run(['systemctl', 'show', 'caddy.service', '--no-pager',
-                     '--property=FragmentPath,ExecStart,ExecReload,User,Group,ActiveState'])
+                     '--property=FragmentPath,ExecStart,ExecReload,User,Group,ActiveState,SubState,MainPID,AmbientCapabilities,DropInPaths,Environment,EnvironmentFiles'])
     info = dict(line.split('=', 1) for line in info.splitlines() if '=' in line)
-    for key in ('FragmentPath', 'ExecStart', 'ExecReload', 'User', 'Group'):
-        if info.get(key) != value['service']['service'].get(key):
+    for key in ('FragmentPath', 'ExecStart', 'ExecReload', 'User', 'Group',
+                'AmbientCapabilities', 'DropInPaths', 'Environment', 'EnvironmentFiles'):
+        actual, expected = info.get(key), value['service']['service'].get(key)
+        if key in ('ExecStart', 'ExecReload'):
+            actual, expected = command_identity(actual), command_identity(expected)
+        if actual != expected:
             raise Refused('回滚检测到外部 unit 变更；保留备份供恢复')
     current = dict(value['service'])
     current['unit_hash'] = digest(host.safe(current['unit']).read_bytes())
@@ -463,11 +494,28 @@ def rollback(host, stage):
     config = host.safe(value['service']['config'], writable=True)
     if digest(config.read_bytes()) not in (value['original'], value['candidate']):
         raise Refused('回滚检测到外部配置变更；保留备份供恢复')
+    dependencies = host.files(config)
+    expected = value['dependencies']
+    if (dependencies['patterns'] != expected['patterns'] or
+            {k: v for k, v in dependencies['files'].items() if k != str(config)} !=
+            {k: v for k, v in expected['files'].items() if k != str(config)}):
+        raise Refused('回滚检测到外部 import 变更；保留备份供恢复')
+    running = (info.get('ActiveState') == 'active' and info.get('SubState') == 'running' and
+               info.get('MainPID', '').isdigit() and int(info['MainPID']) > 1)
+    stopped = ((info.get('ActiveState'), info.get('SubState')) in
+               (('inactive', 'dead'), ('failed', 'failed')) and info.get('MainPID') == '0')
+    if not running and not stopped:
+        raise Refused('回滚无法确认宿主服务稳定状态；保留备份供恢复')
+    if running:
+        active_hash = digest(json.dumps(host.active(), sort_keys=True).encode())
+        candidate_hash = digest(json.dumps(json.loads((stage / 'candidate.json').read_text()), sort_keys=True).encode())
+        if active_hash not in (value['active_hash'], candidate_hash):
+            raise Refused('回滚检测到外部运行配置变更；保留备份供恢复')
     original = (stage / 'original').read_bytes()
     if digest(original) != value['original']:
         raise Refused('回滚备份校验失败')
     atomic(config, original, value['mode'], value['uid'], value['gid'])
-    if info.get('ActiveState') == 'active':
+    if running:
         host.reload()
     else:
         host.run(['systemctl', 'start', 'caddy.service'], timeout=20)

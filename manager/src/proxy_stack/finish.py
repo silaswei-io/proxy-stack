@@ -6,7 +6,9 @@ import os
 import multiprocessing
 import shlex
 import ssl
+import socket
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -17,6 +19,41 @@ from .routes import asset_paths
 
 ATTEMPT_SECONDS = 4
 MAX_ASSET = 2 * 1024 * 1024
+PROGRESS_SECONDS = 10
+REASONS = {
+    'timeout': '连接或检查超时；检查所选 HTTPS 端口的云防火墙、NAT 和服务监听。',
+    'connect': '连接失败；检查所选 HTTPS 端口的云防火墙、NAT、DNS 和服务监听。',
+    'tls': 'TLS 验证失败；检查证书签发、有效期及 HTTP-01 的公网 80 路由。',
+    'http': 'HTTP 响应不符合要求；检查 HTTPS 路由、重定向及响应头。',
+    'content': 'HTTPS 内容不匹配；检查是否路由到本安装及当前订阅内容。',
+    'state': '本机状态不可用或检查期间变化；检查本机状态和服务后重试。',
+    'node': '节点运行同步待完成；检查节点服务、当前配置回执和租约。',
+}
+
+
+class ProbeFailure(Exception):
+    pass
+
+
+def failure_reason(error, phase):
+    # Inspect types only: exception messages/URLs/paths must never cross the pipe.
+    if isinstance(error, ProbeFailure):
+        return error.args[0] if error.args[0] in REASONS else 'state'
+    if phase == 'state':
+        return 'state'
+    if isinstance(error, urllib.error.HTTPError):
+        return 'http'
+    if isinstance(error, urllib.error.URLError):
+        return failure_reason(error.reason, phase) if isinstance(error.reason, BaseException) else 'connect'
+    if isinstance(error, ssl.SSLError):
+        return 'tls'
+    if isinstance(error, (TimeoutError, socket.timeout)):
+        return 'timeout'
+    if isinstance(error, http.client.HTTPException):
+        return 'http'
+    if isinstance(error, OSError):
+        return 'connect'
+    return 'state'
 
 
 def snapshot(store):
@@ -56,14 +93,17 @@ def snapshot(store):
 
 
 def probe(root, pipe):
+    phase = 'state'
     try:
         store = Store(root)
         before = snapshot(store)
         pipe.send({'phase': 'node' if before['role'] == 'node' else 'https',
+                   'reason': 'timeout',
                    'role': before['role'], 'mode': before['mode'], 'nodes': before.get('nodes', 0), 'rules': before.get('rules'),
                    'node_ready': before.get('node_ready', False),
                    'local_required': before.get('local_required', False), 'local_ready': before.get('local_ready', False)})
         if before['role'] == 'node':
+            phase = 'node'
             key = base64.b64encode(os.urandom(16)).decode()
             connection = http.client.HTTPSConnection(before['host'], before['port'], timeout=2,
                                                      context=ssl.create_default_context())
@@ -75,14 +115,18 @@ def probe(root, pipe):
                 expected = base64.b64encode(hashlib.sha1((key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()).decode()
                 if (response.status != 101 or response.getheader('Upgrade', '').lower() != 'websocket'
                         or response.getheader('Sec-WebSocket-Accept') != expected):
-                    raise ValueError('wrong public websocket endpoint')
+                    raise ProbeFailure('http')
             finally:
                 connection.close()
+            phase = 'state'
+            pipe.send({'phase': 'state', 'reason': 'state'})
             after = snapshot(store)
             matched = all(before[k] == after[k] for k in ('origin', 'ws_path'))
-            pipe.send({'role': 'node', 'https': matched, 'node_ready': after['node_ready'],
-                       'ready': matched and after['node_ready']})
+            pipe.send({'phase': 'node', 'role': 'node', 'https': matched, 'node_ready': after['node_ready'],
+                       'ready': matched and after['node_ready'],
+                       'reason': 'node' if matched else 'state'})
             return
+        phase = 'https'
         opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({}), NoRedirect(),
             urllib.request.HTTPSHandler(context=ssl.create_default_context()))
@@ -90,32 +134,37 @@ def probe(root, pipe):
         with opener.open(urllib.request.Request(before['url']), timeout=2) as response:
             if (response.status != 200 or response.headers.get_content_type() != 'application/yaml'
                     or response.headers.get('Cache-Control') != 'no-store'):
-                raise ValueError('invalid response')
+                raise ProbeFailure('http')
             body = response.read(MAX_ASSET + 1)
             if len(body) > MAX_ASSET or hashlib.sha256(body).hexdigest() != before['expected']:
-                raise ValueError('wrong subscription')
+                raise ProbeFailure('content')
+        phase = 'state'
+        pipe.send({'phase': 'state', 'reason': 'state'})
         after = snapshot(store)
         # A concurrent publication/revocation must not endorse the old response.
         matched = after.get('url') == before['url'] and after.get('expected') == before['expected']
         result = {k: v for k, v in after.items() if k not in ('url', 'expected')}
-        result.update(https=matched, ready=matched and after['nodes'] > 0)
+        result.update(phase='https', https=matched, ready=matched and after['nodes'] > 0,
+                      reason='node' if matched else 'state')
         if result['ready']:
             result['url'] = after['url']
         pipe.send(result)
-    except Exception:
+    except Exception as error:
         # Never serialize raw exceptions: HTTP errors may contain private paths.
-        pipe.send({'failed': True})
+        pipe.send({'failed': True, 'reason': failure_reason(error, phase)})
     finally:
         pipe.close()
 
 
-def check(root, wait=0, https_only=False):
+def check(root, wait=0, https_only=False, progress=None):
     """Hard wall-clock cap includes DNS, slow reads and blocked file locks.
 
     No lock survives an attempt. A zero wait runs one probe (at most 4 seconds);
     retry mode has a total budget of wait seconds, including all probes/sleeps.
     """
-    deadline = time.monotonic() + (wait or ATTEMPT_SECONDS)
+    started = time.monotonic()
+    deadline = started + (wait or ATTEMPT_SECONDS)
+    next_progress = started + PROGRESS_SECONDS
     result = {'ready': False, 'phase': 'state'}
     context = multiprocessing.get_context('fork')
     while True:
@@ -124,11 +173,16 @@ def check(root, wait=0, https_only=False):
         child.start()
         writer.close()
         end = min(deadline, time.monotonic() + ATTEMPT_SECONDS)
-        result = {'ready': False, 'phase': 'state'}
+        result = {'ready': False, 'phase': 'state', 'reason': 'state'}
         try:
             while time.monotonic() < end:
-                if not reader.poll(max(0, end - time.monotonic())):
-                    break
+                now = time.monotonic()
+                if progress and now >= next_progress:
+                    progress(int(now - started), result)
+                    next_progress = now + PROGRESS_SECONDS
+                poll_end = min(end, next_progress) if progress else end
+                if not reader.poll(max(0, poll_end - time.monotonic())):
+                    continue
                 try:
                     message = reader.recv()
                 except EOFError:
@@ -145,6 +199,9 @@ def check(root, wait=0, https_only=False):
                 child.join(timeout=0.2)
             reader.close()
         success = completion_ready(result) if https_only else result['ready']
+        if progress and not success and time.monotonic() >= next_progress:
+            progress(int(time.monotonic() - started), result)
+            next_progress = time.monotonic() + PROGRESS_SECONDS
         if success or not wait or time.monotonic() >= deadline:
             return result
         time.sleep(min(1, max(0, deadline - time.monotonic())))
@@ -158,9 +215,18 @@ def completion_ready(result):
     return bool(result.get('https') and (not result.get('local_required') or result.get('local_ready')))
 
 
-def finish(store, wait=0, command='./proxyctl', https_only=False, silent=False):
-    result = check(str(store.root), wait, https_only)
+def finish(store, wait=0, command='./proxyctl', https_only=False, silent=False, progress=False):
+    def report(elapsed, result):
+        reason = result.get('reason', 'state')
+        print(f'HTTPS 完成检查：已等待 {elapsed} 秒；{reason}：' + REASONS.get(reason, REASONS['state']), flush=True)
+    if progress:
+        result = check(str(store.root), wait, https_only, progress=report)
+    else:
+        result = check(str(store.root), wait, https_only)
     success = completion_ready(result) if https_only else result["ready"]
+    if progress and not success:
+        reason = result.get('reason', 'state')
+        print('完成检查失败（' + reason + '）：' + REASONS.get(reason, REASONS['state']), flush=True)
     if silent:
         return 0 if success else 1
     command_text = shlex.quote(command)

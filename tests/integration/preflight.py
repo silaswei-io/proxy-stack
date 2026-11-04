@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fast native Caddy/Compose acceptance. No ports or host services are changed."""
+"""Native Caddy/Compose acceptance with disposable Docker port bindings."""
 import importlib.util
 import json
 import os
@@ -21,7 +21,7 @@ def run(*args, env=None, timeout=30):
     result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout,
                             env=env, cwd=ROOT)
     if result.returncode:
-        raise RuntimeError('native preflight validation failed: ' + args[0])
+        raise RuntimeError('native preflight validation failed: ' + args[0] + '\n' + result.stderr.decode()[-2000:])
     return result.stdout.decode()
 
 
@@ -90,7 +90,7 @@ with tempfile.TemporaryDirectory(prefix='proxy-stack-native-plan-') as temporary
     assert not any(p['target'] in (8090, 2019, 8080) for p in ports)
     # Exercise the *exported*, unmodified Bash payload with real Docker and
     # native pinned Caddy. The adapter substitutes only the locally built image,
-    # cached pulls, and temporary probe bindings (ephemeral loopback ports).
+    # cached pulls, and temporary probe bindings (ephemeral Docker host ports).
     # It does not fake Compose, validation, model code or command results.
     isolated = root / 'exported-check'
     isolated.mkdir()
@@ -104,11 +104,27 @@ with tempfile.TemporaryDirectory(prefix='proxy-stack-native-plan-') as temporary
         uname.chmod(0o700)
     real_docker = shutil.which('docker')
     adapter = binary_dir / 'docker'
+    boundary = isolated / 'roundtrip-boundary.json'
+    gateway = ('host.docker.internal' if sys.platform != 'linux' else
+               run('docker', 'network', 'inspect', 'bridge', '--format', '{{(index .IPAM.Config 0).Gateway}}').strip())
     adapter.write_text('#!' + sys.executable + '\n' +
-        'import os,sys\nargs=sys.argv[1:]\n' +
+        'import json,os,subprocess,sys\nfrom pathlib import Path\nargs=sys.argv[1:]\n' +
         'args=[' + repr(TOOL) + ' if a=="ghcr.io/silaswei-io/proxy-stack:v1.0.0" else a for a in args]\n' +
         'if args[:1]==["pull"]: args=["image","inspect",args[1]]\n' +
-        'if args[:1]==["run"] and "-p" in args: args[args.index("-p")+1]="127.0.0.1::8080"\n' +
+        'boundary=Path(' + repr(str(boundary)) + ')\n' +
+        'docker=' + repr(real_docker) + '\n' +
+        'if args[:1]==["run"] and any(a.startswith("ROUNDTRIP_NONCE=") for a in args):\n' +
+        '    if "-p" in args:\n' +
+        '        args[args.index("-p")+1]="0.0.0.0::8080"\n' +
+        '        subprocess.run([docker]+args,check=True,stdout=subprocess.DEVNULL)\n' +
+        '        name=args[args.index("--name")+1]\n' +
+        '        ports=json.loads(subprocess.check_output([docker,"inspect","--format","{{json .NetworkSettings.Ports}}",name]))\n' +
+        '        boundary.write_text(json.dumps({"port":ports["8080/tcp"][0]["HostPort"],"listener":name}))\n' +
+        '        sys.exit(0)\n' +
+        '    # Explicit nonce fixture boundary: never route to the synthetic 8.8.8.8.\n' +
+        '    state=json.loads(boundary.read_text());state["probe"]=args[args.index("--name")+1];boundary.write_text(json.dumps(state))\n' +
+        '    args=["ROUNDTRIP_HOST="+' + repr(gateway) + ' if a.startswith("ROUNDTRIP_HOST=") else "ROUNDTRIP_PORT="+state["port"] if a.startswith("ROUNDTRIP_PORT=") else "ROUNDTRIP_NONCE="+"0"*64 if a.startswith("ROUNDTRIP_NONCE=") and os.environ.get("NATIVE_BAD_NONCE") else a for a in args]\n' +
+        'elif args[:1]==["run"] and "-p" in args: args[args.index("-p")+1]="127.0.0.1::8080"\n' +
         'os.execv(' + repr(real_docker) + ', ["docker"]+args)\n')
     adapter.chmod(0o700)
     if not shutil.which('timeout'):
@@ -126,6 +142,19 @@ with tempfile.TemporaryDirectory(prefix='proxy-stack-native-plan-') as temporary
     assert '预检通过' in output and 'HTTPS 8.8.8.8:34567' in output
     assert not (isolated / 'installation').exists()
     assert not (isolated / 'installation.install-lock').exists()
+    def roundtrip_clean():
+        state = json.loads(boundary.read_text())
+        for name in (state['listener'], state['probe']):
+            assert not run('docker', 'ps', '-aq', '--filter', 'name=^/' + name + '$').strip()
+    roundtrip_clean()
+    failed = subprocess.run(['bash', str(payload), '--check', '--non-interactive', '--domain', '8.8.8.8',
+                             '--name', 'Native Check', '--port', '34567', '--directory', str(isolated / 'installation')],
+                            env=dict(check_env, NATIVE_BAD_NONCE='1'), text=True, capture_output=True, timeout=60)
+    assert failed.returncode and '公共地址回环失败' in failed.stderr
+    assert not (isolated / 'installation').exists()
+    assert not (isolated / 'installation.install-lock').exists()
+    roundtrip_clean()
+    print('PASS: actual Docker published-port nonce roundtrip from separate bridge container; wrong nonce fails early; both containers removed')
 
     # Debian's actual 2.6.2 binary exercises no-v version, bare-module report,
     # file adaptation, relative imports, old native syntax and temporary cleanup.
@@ -158,4 +187,4 @@ print('PASS: actual Debian stock '+version+'; native relative imports, candidate
     print(run('docker', 'run', '--rm', '--network', 'none', '--read-only', '--cap-drop=ALL',
               '--cap-add=NET_BIND_SERVICE', '--tmpfs', '/data', '--tmpfs', '/config', '--tmpfs', '/tmp',
               '-v', str(root) + ':/work', 'proxy-stack-native-caddy26:v1.0.0', '-c', code).strip())
-print('PASS: native routes/imports preserved; HTTP-01 -> internal :80; high-port HTTPS; TLS-ALPN disabled; IP shortlived/default_sni; private logs; Compose; actual exported installer --check (isolated loopback probes)')
+print('PASS: native routes/imports preserved; HTTP-01 -> internal :80; high-port HTTPS; TLS-ALPN disabled; IP shortlived/default_sni; private logs; Compose; exported installer --check with explicit isolated nonce boundary')

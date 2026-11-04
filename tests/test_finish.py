@@ -1,11 +1,13 @@
 """Completion must prove the own HTTPS asset and a live acknowledged node."""
 import contextlib
 import io
+import json
 import os
 import ssl
 import tempfile
 import time
 import unittest
+import urllib.error
 from dataclasses import asdict
 from email.message import Message
 from pathlib import Path
@@ -109,6 +111,80 @@ class FinishTests(unittest.TestCase):
         self.assertEqual(request.get_method(), 'GET')
         self.assertEqual(request.full_url, 'https://proxy.example.com/' + self.store.state()['users']['owner']['token'] + '/clash')
         self.assertEqual(self.opener.return_value.open.call_args.kwargs, {'timeout': 2})
+
+    def test_classified_failures_cross_pipe_without_exception_urls_or_identity(self):
+        self.ack()
+        private = 'https://private.example/' + self.store.state()['users']['owner']['token']
+        failures = [(TimeoutError(private), 'timeout'), (ConnectionRefusedError(private), 'connect'),
+                    (urllib.error.URLError(private), 'connect'),
+                    (finish.http.client.BadStatusLine(private), 'http'),
+                    (urllib.error.URLError(ssl.SSLCertVerificationError(private)), 'tls'),
+                    (urllib.error.HTTPError(private, 302, private, None, None), 'http'),
+                    (Response(self.asset(), mime='text/html'), 'http'), (Response(b'wrong'), 'content')]
+        class Pipe:
+            def __init__(self): self.messages = []
+            def send(self, value): self.messages.append(value)
+            def close(self): pass
+        for failure, reason in failures:
+            pipe = Pipe()
+            if isinstance(failure, Exception):
+                self.opener.return_value.open.side_effect = failure
+            else:
+                self.opener.return_value.open.side_effect = None
+                self.opener.return_value.open.return_value = failure
+            finish.probe(str(self.store.root), pipe)
+            self.assertEqual(pipe.messages[-1]['reason'], reason)
+            serialized = json.dumps(pipe.messages)
+            self.assertNotIn(private, serialized)
+            self.assert_private(serialized)
+            if isinstance(failure, Response):
+                self.opener.return_value.open.return_value = Response(
+                    b'wrong' if reason == 'content' else self.asset(),
+                    mime='text/html' if reason == 'http' else 'application/yaml')
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = finish.finish(self.store, silent=True, progress=True)
+            self.assertEqual(code, 1)
+            self.assertIn('失败（' + reason + '）', output.getvalue())
+            self.assert_private(output.getvalue())
+        with patch.object(finish, 'snapshot', side_effect=OSError(private)):
+            pipe = Pipe()
+            finish.probe(str(self.store.root), pipe)
+            self.assertEqual(pipe.messages[-1]['reason'], 'state')
+            self.assertNotIn(private, json.dumps(pipe.messages))
+
+    def test_wait_reports_progress_even_when_probe_is_blocked_with_hard_cap(self):
+        reports = []
+        with patch.object(finish, 'snapshot', side_effect=lambda *_: time.sleep(10)), \
+             patch.object(finish, 'PROGRESS_SECONDS', .1), patch.object(finish, 'ATTEMPT_SECONDS', .4):
+            started = time.monotonic()
+            result = finish.check(str(self.store.root), wait=.7,
+                                  progress=lambda elapsed, value: reports.append((elapsed, dict(value))))
+        self.assertLess(time.monotonic() - started, 1.3)
+        self.assertGreaterEqual(len(reports), 3)
+        self.assertEqual(result['reason'], 'state')
+        self.assertTrue(all(value['reason'] == 'state' for _, value in reports))
+        self.assert_private(json.dumps(reports))
+
+    def test_success_at_progress_boundary_does_not_report_pending(self):
+        def completed(_root, pipe):
+            time.sleep(.15)
+            pipe.send({'ready': True, 'https': True, 'reason': 'node'})
+            pipe.close()
+        reports = []
+        with patch.object(finish, 'probe', completed), patch.object(finish, 'PROGRESS_SECONDS', .1):
+            def report(*args):
+                reports.append((args[0], dict(args[1])))
+            # The pipe becomes readable just before the next progress boundary;
+            # handling it crosses the boundary before the final success check.
+            original = finish.completion_ready
+            def delayed(value):
+                time.sleep(.1)
+                return original(value)
+            with patch.object(finish, 'completion_ready', side_effect=delayed):
+                result = finish.check(str(self.store.root), https_only=True, progress=report)
+        self.assertTrue(result['ready'])
+        self.assertFalse(any(value.get('ready') for _, value in reports))
 
     def test_https_ready_but_pending_offline_removed_or_stale_generation_node(self):
         code, output = self.run_finish()
@@ -221,6 +297,18 @@ class FinishTests(unittest.TestCase):
                 self.assertIn('统一订阅链接请从中心获取', output)
                 self.assertNotIn('/sub/', output)
         self.opener.assert_not_called()
+        original_snapshot = finish.snapshot
+        def blocked_after_network(store):
+            if blocked_after_network.calls:
+                time.sleep(10)
+            blocked_after_network.calls += 1
+            return original_snapshot(store)
+        blocked_after_network.calls = 0
+        with patch.object(finish, 'snapshot', side_effect=blocked_after_network), \
+             patch.object(finish, 'ATTEMPT_SECONDS', .3):
+            result = finish.check(str(node.root))
+        self.assertEqual(result['phase'], 'state')
+        self.assertEqual(result['reason'], 'state')
         atomic_file(node.runtime / 'node-status.json', json.dumps(status))
         with patch('proxy_stack.finish.http.client.HTTPSConnection', side_effect=ssl.SSLCertVerificationError('private path')):
             code, output = self.run_finish()

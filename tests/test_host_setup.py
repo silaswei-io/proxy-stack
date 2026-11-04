@@ -14,6 +14,11 @@ from unittest.mock import patch
 from proxy_stack import host_setup as setup
 
 
+# Real systemctl show layout before/after systemctl reload on stock Caddy 2.6.
+RELOAD_BEFORE = '{ path=/usr/bin/caddy ; argv[]=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0 }'
+RELOAD_AFTER = '{ path=/usr/bin/caddy ; argv[]=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force ; ignore_errors=no ; start_time=[Wed 2026-11-04 06:22:38 UTC] ; stop_time=[Wed 2026-11-04 06:22:38 UTC] ; pid=54219 ; code=exited ; status=0 }'
+
+
 class HostFixture(setup.Host):
     """Persistent fake stock Caddy 2.6 + systemd/process/listener boundary."""
     def __init__(self, root):
@@ -37,8 +42,10 @@ class HostFixture(setup.Host):
                      'FragmentPath': str(self.unit), 'User': 'caddy', 'Group': 'caddy',
                      'AmbientCapabilities': 'cap_net_bind_service', 'DropInPaths': '',
                      'Environment': '', 'EnvironmentFiles': '',
-                     'ExecStart': '{ path=' + str(self.binary) + ' ; argv[]=' + str(self.binary) + ' run --environ --config ' + str(self.config) + ' ; }',
-                     'ExecReload': '{ path=' + str(self.binary) + ' ; argv[]=' + str(self.binary) + ' reload --config ' + str(self.config) + ' --force ; }'}
+                     'ExecStart': '{ path=' + str(self.binary) + ' ; argv[]=' + str(self.binary) + ' run --environ --config ' + str(self.config) + ' ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0 }',
+                     'ExecReload': '{ path=' + str(self.binary) + ' ; argv[]=' + str(self.binary) + ' reload --config ' + str(self.config) + ' --force ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0 }'}
+        if self.events.exists() and '["systemctl", "reload"]' in self.events.read_text():
+            self.info['ExecReload'] = self.info['ExecReload'].replace('start_time=[n/a]', 'start_time=[Wed 2026-11-04 06:22:38 UTC]').replace('stop_time=[n/a]', 'stop_time=[Wed 2026-11-04 06:22:38 UTC]').replace('pid=0', 'pid=54219').replace('code=(null)', 'code=exited')
         self.module_output = 'http.handlers.reverse_proxy\n\n  Standard modules: 1\n  Non-standard modules: 0\n  Unknown modules: 0\n'
         self.listeners = 'LISTEN 0 4096 *:80 *:* users:(("caddy",pid=123,fd=7))\n'
         self.fail_validate = False
@@ -47,6 +54,8 @@ class HostFixture(setup.Host):
         self.invalid_original = False
 
     def active(self):
+        if self.info['ActiveState'] != 'active':
+            raise setup.Refused('admin unavailable while stopped')
         return self.adapt(str(self.binary), self.config, self.loaded.read_text())
 
     def safe(self, path, writable=False):
@@ -76,11 +85,13 @@ class HostFixture(setup.Host):
                 self.fail_reload = False
                 raise setup.Refused('simulated reload failure')
             self.loaded.write_bytes(self.config.read_bytes())
+            self.info['ExecReload'] = self.info['ExecReload'].replace('start_time=[n/a]', 'start_time=[Wed 2026-11-04 06:22:38 UTC]').replace('stop_time=[n/a]', 'stop_time=[Wed 2026-11-04 06:22:38 UTC]').replace('pid=0', 'pid=54219').replace('code=(null)', 'code=exited')
             return ''
         if argv[:2] == ['systemctl', 'is-active']:
             return 'active\n'
         if argv[:2] == ['systemctl', 'start']:
-            self.info['ActiveState'] = 'active'
+            self.info.update(ActiveState='active', SubState='running', MainPID='123')
+            self.loaded.write_bytes(self.config.read_bytes())
             return ''
         if 'adapt' in argv:
             text = Path(argv[argv.index('--config') + 1]).read_text()
@@ -99,12 +110,12 @@ class HostFixture(setup.Host):
         raise AssertionError(argv)
 
 
-def fixture_main(root, argv):
+def fixture_main(root, argv, helper=None):
     host = HostFixture(root)
     with patch('proxy_stack.host_setup.platform.system', return_value='Linux'), \
          patch('proxy_stack.host_setup.os.geteuid', return_value=0), \
          patch('proxy_stack.host_setup.pwd.getpwnam', return_value=SimpleNamespace(pw_uid=999)):
-        return setup.main(argv, host=host)
+        return (helper or setup).main(argv, host=host)
 
 
 class HostSetupTests(unittest.TestCase):
@@ -146,6 +157,83 @@ class HostSetupTests(unittest.TestCase):
         self.assertNotIn('default_sni', candidate)
         self.assertEqual((self.stage / 'original').stat().st_mode & 0o777, 0o600)
         self.assertNotIn('reload', self.host.events.read_text())
+
+    def test_real_systemctl_reload_metadata_and_legacy_raw_journal_recover(self):
+        self.assertEqual(setup.command_identity(RELOAD_BEFORE), setup.command_identity(RELOAD_AFTER))
+        value = self.plan()
+        # Old journals saved the full strings, with no identity schema marker.
+        value['service']['service'] = dict(self.host.info)
+        setup.save(self.stage / 'journal.json', value)
+        self.host.info['ExecStart'] = self.host.info['ExecStart'].replace('pid=0', 'pid=123')
+        setup.recheck(self.host, value)
+        setup.apply(self.host, self.stage)
+        self.assertIn('pid=54219', self.host.info['ExecReload'])
+        setup.rollback(self.host, self.stage)
+        self.unchanged()
+
+    def test_stable_command_identity_rejects_actual_changes_and_multiple_commands(self):
+        for changed in (RELOAD_AFTER.replace('--force', '--adapter json'),
+                        RELOAD_AFTER.replace('path=/usr/bin/caddy', 'path=/usr/local/bin/caddy'),
+                        RELOAD_AFTER.replace('ignore_errors=no', 'ignore_errors=yes')):
+            self.assertNotEqual(setup.command_identity(RELOAD_BEFORE), setup.command_identity(changed))
+        with self.assertRaises(setup.Refused):
+            setup.command_identity(RELOAD_BEFORE + ' ' + RELOAD_AFTER)
+
+    def test_rollback_refuses_command_unit_binary_import_and_active_config_drift(self):
+        imported = self.host.root / 'extra.conf'
+        imported.write_text('# imported original\n')
+        self.host.config.write_bytes(self.old + b'import extra.conf\n')
+        self.host.loaded.write_bytes(self.host.config.read_bytes())
+        self.plan()
+        setup.apply(self.host, self.stage)
+        candidate = self.host.config.read_bytes()
+        for key, change in (('ExecReload', '--force --adapter json'), ('User', 'root'),
+                            ('Group', 'root'), ('AmbientCapabilities', ''), ('DropInPaths', '/other')):
+            before = self.host.info[key]
+            self.host.info[key] = before.replace('--force', change) if key == 'ExecReload' else change
+            with self.subTest(key=key), self.assertRaises(setup.Refused):
+                setup.rollback(self.host, self.stage)
+            self.host.info[key] = before
+            self.assertEqual(self.host.config.read_bytes(), candidate)
+        for path in (self.host.unit, self.host.binary, imported):
+            before = path.read_bytes()
+            path.write_bytes(before + b'# external change\n')
+            with self.subTest(path=path.name), self.assertRaises(setup.Refused):
+                setup.rollback(self.host, self.stage)
+            path.write_bytes(before)
+        with patch.object(self.host, 'active', return_value={'external': 'admin API change'}), self.assertRaises(setup.Refused):
+            setup.rollback(self.host, self.stage)
+        setup.rollback(self.host, self.stage)
+
+    def test_rollback_stopped_service_starts_before_admin_baseline_verification(self):
+        for active, sub in (('inactive', 'dead'), ('failed', 'failed')):
+            with self.subTest(state=active):
+                self.plan()
+                setup.apply(self.host, self.stage)
+                self.host.info.update(ActiveState=active, SubState=sub, MainPID='0')
+                with self.assertRaises(setup.Refused):
+                    self.host.active()
+                setup.rollback(self.host, self.stage)
+                self.unchanged()
+                self.assertEqual(self.host.loaded.read_bytes(), self.old)
+                self.assertIn('["systemctl", "start"]', self.host.events.read_text())
+                self.assertEqual(json.loads((self.stage / 'journal.json').read_text())['phase'], 'rolled-back')
+
+    def test_rollback_refuses_transitioning_unknown_or_inconsistent_service_states(self):
+        self.plan()
+        setup.apply(self.host, self.stage)
+        candidate = self.host.config.read_bytes()
+        for active, sub, pid in (('activating', 'start', '0'), ('deactivating', 'stop', '123'),
+                                 ('reloading', 'reload', '123'), ('unknown', 'dead', '0'),
+                                 ('inactive', 'dead', '123'), ('active', 'exited', '0'),
+                                 ('failed', 'running', '123')):
+            with self.subTest(state=(active, sub, pid)):
+                self.host.info.update(ActiveState=active, SubState=sub, MainPID=pid)
+                with self.assertRaises(setup.Refused), patch.object(self.host, 'active') as admin:
+                    setup.rollback(self.host, self.stage)
+                admin.assert_not_called()
+                self.assertEqual(self.host.config.read_bytes(), candidate)
+        self.assertNotIn('["systemctl", "start"]', self.host.events.read_text())
 
     def test_unknown_listener_custom_module_user_and_unit_fail_without_changes(self):
         changes = [(self.host, 'listeners', self.host.listeners.replace('pid=123', 'pid=456')),
