@@ -8,9 +8,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build tool image
-        run: docker build -t proxy-stack-tool:0.1.1 -f manager/Dockerfile .
+        run: docker build -t proxy-stack-tool:0.1.2 -f manager/Dockerfile .
       - name: Offline unit and regression tests
-        run: docker run --rm --entrypoint python -v "$PWD/tests:/tests:ro" proxy-stack-tool:0.1.1 -m unittest discover -s /tests -v
+        run: docker run --rm --entrypoint python -v "$PWD/tests:/tests:ro" proxy-stack-tool:0.1.2 -m unittest discover -s /tests -v
       - name: Check both Compose layouts
         env:
           DOMAIN: proxy.example.com

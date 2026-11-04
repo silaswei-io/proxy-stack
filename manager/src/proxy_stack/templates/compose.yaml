@@ -1,6 +1,6 @@
 name: proxy-stack
 x-tool: &tool
-  image: ${TOOL_IMAGE:-ghcr.io/silaswei/proxy-stack:0.1.1}
+  image: ${TOOL_IMAGE:-ghcr.io/silaswei/proxy-stack:0.1.2}
   build:
     context: .
     dockerfile: manager/Dockerfile
@@ -11,6 +11,7 @@ x-tool: &tool
   environment:
     DOMAIN: ${DOMAIN:?Set DOMAIN in .env}
     NODE_NAME: ${NODE_NAME:-}
+    HOST_NODE_NAME: ${HOST_NODE_NAME:-}
     PUBLIC_PORT: ${PUBLIC_PORT:-443}
     MODE: ${MODE:-standalone}
     CONTACT_EMAIL: ${CONTACT_EMAIL:-}

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Generic proxy-stack 0.1.1 installer. Prompts deliberately bypass piped stdin.
+# Generic proxy-stack 0.1.2 installer. Prompts deliberately bypass piped stdin.
 set -euo pipefail
 umask 077
-tool_image=ghcr.io/silaswei/proxy-stack:0.1.1
+tool_image=ghcr.io/silaswei/proxy-stack:0.1.2
 domain= node_name= directory= mode=auto
 prepare_only=false
 non_interactive=false
@@ -78,12 +78,35 @@ prompt() {
   printf '%s' "$2" >&3
   IFS= read -r reply <&3 || fail '输入已结束。'
 }
-if [ -z "$domain" ]; then prompt --domain '代理域名（如 proxy.example.com）: '; domain=$reply; fi
-if [ -z "$node_name" ]; then prompt --name '节点名称（如 我的 VPS）: '; node_name=$reply; fi
+if [ -z "$domain" ]; then
+  detected_ip=$(docker run --rm --read-only --cap-drop=ALL --network bridge "$tool_image" detect-public-ip) || detected_ip=
+  if $non_interactive; then
+    [ -n "$detected_ip" ] || fail '无法检测公网 IP；请使用 --domain 指定域名或公网 IP。'
+    domain=$detected_ip
+  else
+    prompt --domain "代理域名或公网 IP（回车使用 ${detected_ip:-探测失败，请显式输入}）: "
+    domain=${reply:-$detected_ip}
+    [ -n "$domain" ] || fail '无法检测公网 IP；请使用 --domain 指定域名或公网 IP。'
+  fi
+fi
+if [ -z "$node_name" ]; then
+  # Run hostname on the HOST, then sanitize inside the tool. Never use the
+  # ephemeral container's hostname, and never source/eval a derived value.
+  host_node_name=$(hostname 2>/dev/null) || host_node_name=
+  host_node_name=${host_node_name:0:1024}
+  default_name=$(docker run --rm --read-only --cap-drop=ALL --network none \
+    -e "HOST_NODE_NAME=$host_node_name" "$tool_image" default-node-name) || fail '无法生成默认节点名称。'
+  if $non_interactive; then
+    node_name=$default_name
+  else
+    prompt --name "节点名称（回车使用 $default_name）: "
+    node_name=${reply:-$default_name}
+  fi
+fi
 # The existing Python model is authoritative; the host needs neither Python nor git.
 domain=$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]')
 docker run --rm --read-only --cap-drop=ALL --network none \
-  -e "DOMAIN=$domain" -e "NODE_NAME=$node_name" "$tool_image" validate-input || fail '域名或节点名称无效；请修正输入后重试。'
+  -e "DOMAIN=$domain" -e "NODE_NAME=$node_name" "$tool_image" validate-input || fail '域名、公网 IP 或节点名称无效；请修正输入后重试。'
 
 # Ask the Docker daemon to reserve each intended host binding briefly. This also
 # detects host listeners without requiring ss/lsof/Python or mounting docker.sock.
@@ -107,7 +130,7 @@ if [ "$mode" != existing-caddy ]; then
     fail '无法绑定 80/443（端口占用或 Docker 绑定失败）；不会停止现有服务。可使用 --mode existing-caddy。'
   else
     printf '80/443 无法绑定；不会停止或覆盖现有服务。可使用已有反代模式（回环 18090）。\n'
-    prompt --mode '使用已有反代模式？需手动为该域名配置 HTTPS 路由。[y/N]: '
+    prompt --mode '使用已有反代模式？需手动为该地址配置 HTTPS 路由。[y/N]: '
     case "$reply" in y|Y) mode=existing-caddy ;; *) fail '已取消；可使用 --mode existing-caddy 重试。' ;; esac
   fi
 fi
@@ -144,9 +167,18 @@ else
 fi
 printf '\nowner 私密订阅（请勿公开）：\n%s\n' "$links"
 if [ "$mode" = existing-caddy ]; then
-  printf '待处理：审查 %s/data/runtime/host-caddy.snippet，将域名 HTTPS 路由指向 127.0.0.1:18090；公共链接在配置完成前不可用。\n' "$directory"
+  printf '待处理：审查 %s/data/runtime/host-caddy.snippet，将地址 HTTPS 路由指向 127.0.0.1:18090；公共链接在配置完成前不可用。\n' "$directory"
 fi
-printf 'TLS 尚未验证：确认域名 A/AAAA 指向本机，公网 80/443 可达且 CAA 允许 ACME。\n'
+case "$domain" in
+  *:*) ip_mode=true ;;
+  *[!0-9.]* ) ip_mode=false ;;
+  *) ip_mode=true ;;
+esac
+if $ip_mode; then
+  printf 'TLS 尚未验证：公网 IP 证书签发待完成（并非就绪），无需域名/DNS；公网 80/443 必须可达且持续支持自动续期。使用 Let’s Encrypt shortlived（约160小时）证书；已有反代需 Caddy >= 2.11 并合并生成的 TLS/global 配置。\n'
+else
+  printf 'TLS 尚未验证：确认域名 A/AAAA 指向本机，公网 80/443 可达且 CAA 允许 ACME。\n'
+fi
 printf '规则初始为 minimal-bootstrap；updater 将刷新完整规则。稍后在菜单查看状态，rules=upstream 后再日常使用。\n'
 printf '路由、DNS 和证书就绪后可执行：%q verify\n' "$directory/proxyctl"
 printf '打开中文管理菜单：%q menu\n' "$directory/proxyctl"

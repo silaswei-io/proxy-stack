@@ -63,3 +63,22 @@ Linux amd64 CI 曾在 init 阶段出现 `PermissionError`：非 root runner 创�
 - 独立使用镜像导出的实际脚本在临时目录完成初始化、Compose 配置验证及重跑，凭据保持不变；未启动真实服务器服务。
 - 新安装持久化独立 Compose 项目名，受管包装器清除继承的项目配置变量，避免操作另一目录的服务。
 - Linux amd64 和0.1.1发布结果见 GitHub Actions；公网 ACME、外部可达性和QX iOS仍需实机验收。
+
+
+## v0.1.2 公网 IP 和宿主机名默认值验证
+
+2026-11-04，本地 macOS Docker Desktop / linux arm64；未连接真实服务器，未提交、发布、部署或修改已有服务。
+
+- **40 项离线单元测试通过**：保留原有 31 项覆盖，新增默认值、两次回车、探测失败及显式离线覆盖、宿主机名清理、严格公网 IP/注入拒绝、IPv4/IPv6 客户端与引导规则测试。固定 HTTPS 探测有响应大小、单次请求和总时限，禁止重定向和环境代理。
+- 固定 Caddy 2.11.4 对 IPv4/IPv6 独立配置及主机片段执行原生 `adapt` 和 `validate`，确认显式 Let’s Encrypt ACME `shortlived` profile、无内部签发器，且保留 `default_sni`；外部网关仍为纯 HTTP。这些检查禁用容器网络，不发公网 ACME 请求。
+- 实际 Docker 集成通过：两种 Compose 布局和权限隔离、Mihomo/Xray/Caddy 原生配置、HTTP 路由拒绝、域名 TLS/VLESS、独立撤销、updater 离线刷新，以及 IPv4/IPv6 SAN 的可信测试 CA 链校验、HTTPS 下载与真实 WSS/VLESS TCP 出站。TLS ClientHello 日志确认 IP 客户端没有发送 SNI；错误 IP SAN、不可信 CA 均被拒绝。测试连接始终为回环随机高端口，没有绑定宿主机 80/443。
+- 仅在独立测试运行配置中将已检查的 ACME 签发器替换为测试 CA；生产配置不变，未安装测试 CA 到系统/客户端。测试等待可验证握手，避免把 CA 文件创建误认为站点证书已经就绪。
+- 工具镜像构建、wheel 构建/安装、版本和模板/bootstrap/discovery 包数据检查通过；更新渲染哈希。shell/Python 语法及 `git diff --check` 通过。临时测试容器、网络和数据自动清理。
+
+公网 IP 的真实 ACME 签发/续期、真实服务器 IPv6 入站、QX iOS 原生导入仍待实机验收；本次未运行 Linux amd64 CI 或发布工作流。安装器明确区分证书待签发和就绪，IP 无需域名/DNS，但公网 80/443 必须可达并持续支持续期。GHCR 包可见性未更改。
+
+## v0.1.2 独立安装检查补充
+
+- 实际导出的安装脚本在临时物理目录中省略地址和名称，以非交互 prepare-only 模式初始化成功；模型地址确认为全局公网 IP、名称确认为宿主机 hostname，重跑后模型凭据保持不变。只探测回环18090，没有启动真实服务；临时项目网络和数据已清理。
+- 公网 IP 探测实际运行成功，约1.1秒；主机名显式传入工具后输出正确。
+- GHCR 包可见性已由用户改为 Public；0.1.1已通过匿名 manifest HTTP200 和空白 Docker 认证配置下的实际拉取/运行验证，旧401问题解除。0.1.2发布结果以 GitHub Actions 和 registry 核验记录为准。

@@ -39,7 +39,11 @@ if args[0] == 'run':
         if arg == '-e':
             key, value = args[i + 1].split('=', 1)
             os.environ[key] = value
-    sys.exit(main(['validate-input']))
+    if args[-1] == 'detect-public-ip':
+        if os.environ.get('FAKE_IP_FAILURE'):
+            sys.exit(1)
+        print(os.environ.get('FAKE_PUBLIC_IP', '8.8.8.8')); sys.exit(0)
+    sys.exit(main([args[-1]]))
 assert args[0] == 'compose', args
 assert os.environ.get('COMPOSE_FILE') != '/unrelated/compose.yaml', 'inherited Compose configuration'
 if args[1] == 'run':
@@ -73,6 +77,9 @@ class InstallerTests(unittest.TestCase):
         fake = self.bin / "docker"
         fake.write_text("#!" + sys.executable + "\n" + FAKE_DOCKER)
         fake.chmod(0o700)
+        hostname = self.bin / "hostname"
+        hostname.write_text('#!/bin/sh\nprintf "%s\\n" "${FAKE_HOSTNAME-test-host_01}"\n')
+        hostname.chmod(0o700)
         self.log = self.root / "docker.jsonl"
         self.env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ["PATH"],
                         FAKE_DOCKER_LOG=str(self.log))
@@ -171,18 +178,75 @@ class InstallerTests(unittest.TestCase):
         config.symlink_to("saved.env")
         self.assertNotEqual(self.install().returncode, 0)
 
-    def test_invalid_inputs_and_missing_headless_inputs_fail_without_writes(self):
+    def test_invalid_inputs_fail_without_writes(self):
         for args in (("--domain", "https://bad.example.com"), ("--name", "a,b"),
                      ("--name", "$(touch /tmp/never-execute)"), ("--name", "VPS"),
                      ("--domain", "bad.example.com\nEVIL=x"), ("--mode", "bad"), ("--domain",)):
             with self.subTest(args=args):
                 self.assertNotEqual(self.install(*args).returncode, 0)
                 self.assertFalse(self.destination.exists())
-        self.assertNotEqual(self.install(inputs=False).returncode, 0)
+        self.assertNotEqual(self.install(inputs=False, env=dict(self.env, FAKE_IP_FAILURE="1")).returncode, 0)
         no_tty = subprocess.run(["bash", "-s", "--", "--directory", str(self.destination)], input=self.payload,
                                 text=True, capture_output=True, env=self.env, start_new_session=True, timeout=5)
         self.assertNotEqual(no_tty.returncode, 0)
         self.assertIn("无终端", no_tty.stderr)
+
+    def test_omitted_headless_inputs_use_public_ip_and_host_hostname(self):
+        result = self.install("--prepare-only", inputs=False)
+        self.assert_ok(result)
+        state = json.loads((self.destination / "data/model/state.json").read_text())
+        self.assertEqual(state["settings"]["domain"], "8.8.8.8")
+        self.assertEqual(state["settings"]["node_name"], "test-host_01")
+        self.assertIn("无需域名/DNS", result.stdout)
+        self.assertIn("证书签发待完成", result.stdout)
+        self.assertNotIn("A/AAAA", result.stdout)
+        self.log.write_text("")
+        self.assert_ok(self.install(inputs=False, env=dict(self.env, FAKE_IP_FAILURE="1")))
+        self.assertFalse(any("detect-public-ip" in c or "default-node-name" in c for c in self.calls()))
+
+    def test_explicit_address_skips_discovery_even_offline(self):
+        result = self.install("--domain", "2606:4700:4700::1111", "--prepare-only",
+                              inputs=False, env=dict(self.env, FAKE_IP_FAILURE="1", FAKE_HOSTNAME="DIRECT"))
+        self.assert_ok(result)
+        state = json.loads((self.destination / "data/model/state.json").read_text())
+        self.assertEqual(state["settings"]["node_name"], "Server-DIRECT")
+        self.assertIn("https://[2606:4700:4700::1111]/sub/", result.stdout)
+        self.assertFalse(any("detect-public-ip" in c for c in self.calls()))
+
+    def test_hostname_sanitized_without_executing_and_explicit_name_strict(self):
+        marker = self.root / "never-execute"
+        hostile = "$(touch " + str(marker) + "),\n[mitm]" + "x" * 200
+        result = self.install("--domain", "proxy.example.com", "--prepare-only", inputs=False,
+                              env=dict(self.env, FAKE_HOSTNAME=hostile))
+        self.assert_ok(result)
+        self.assertFalse(marker.exists())
+        state = json.loads((self.destination / "data/model/state.json").read_text())
+        name = state["settings"]["node_name"]
+        self.assertLessEqual(len(name), 80)
+        self.assertNotIn("$", name)
+        self.assertNotIn("\n", name)
+
+    def test_enter_twice_accepts_displayed_defaults(self):
+        installer_file = self.root / "installer.sh"
+        installer_file.write_text(self.payload)
+        code, output = self.terminal(["bash", "-c", 'cat "$1" | bash -s -- --directory "$2" --prepare-only',
+                                     "installer-test", str(installer_file), str(self.destination)], "\n\n")
+        self.assertEqual(code, 0, output)
+        self.assertIn("回车使用 8.8.8.8", output)
+        self.assertIn("回车使用 test-host_01", output)
+        state = json.loads((self.destination / "data/model/state.json").read_text())
+        self.assertEqual(state["settings"]["domain"], "8.8.8.8")
+        self.assertEqual(state["settings"]["node_name"], "test-host_01")
+
+    def test_probe_failure_allows_explicit_terminal_override(self):
+        self.env["FAKE_IP_FAILURE"] = "1"
+        installer_file = self.root / "installer.sh"
+        installer_file.write_text(self.payload)
+        code, output = self.terminal(["bash", "-c", 'cat "$1" | bash -s -- --directory "$2" --prepare-only',
+                                     "installer-test", str(installer_file), str(self.destination)],
+                                    "proxy.example.com\n\n")
+        self.assertEqual(code, 0, output)
+        self.assertIn("探测失败，请显式输入", output)
 
     def test_docker_and_compose_requirements_fail_helpfully(self):
         for changes, message in (({"FAKE_DOCKER_DOWN": "1"}, "Docker 不可用"),

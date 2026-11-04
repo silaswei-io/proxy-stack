@@ -2,13 +2,14 @@
 """Disposable Docker integration; only loopback ephemeral high ports are published.
 
 No GitHub access or real deployment inputs are needed. Existing containers are not
-touched. The tool image must first be built as proxy-stack-tool:0.1.1.
+touched. The tool image must first be built as proxy-stack-tool:0.1.2.
 On Linux with rootful Docker, run with sudo: both the bind-mount ownership and
 host Python's access to generated root-owned 0700 directories require root.
 """
 import base64
 import hashlib
 import http.client
+import ipaddress
 import json
 import os
 import shutil
@@ -23,7 +24,7 @@ import uuid
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-TOOL = os.environ.get("TEST_TOOL_IMAGE", "proxy-stack-tool:0.1.1")
+TOOL = os.environ.get("TEST_TOOL_IMAGE", "proxy-stack-tool:0.1.2")
 XRAY = os.environ.get("TEST_XRAY_IMAGE", "ghcr.io/xtls/xray-core:26.7.11@sha256:a1644183accdb0b5be967093fe34be756fd5de15fe2ee0206e842ae17350967f")
 CADDY = os.environ.get("TEST_CADDY_IMAGE", "caddy:2.11.4@sha256:0c994536bddb66445885237f1a5dcc1916bccea922661c76b4e9fc24061f9b52")
 MIHOMO = os.environ.get("TEST_MIHOMO_IMAGE", "metacubex/mihomo:v1.19.15@sha256:da91cd45f1c96fe964982d7bcf3e7252d122022c65694365f3cd36c76e2d2ebd")
@@ -46,11 +47,12 @@ def recv_exact(stream, count):
     return result
 
 
-def tunnel(port, context, state, user, origin_ip):
+def tunnel(port, context, state, user, origin_ip, server_hostname="localhost"):
+    host = "[" + server_hostname + "]" if ":" in server_hostname else server_hostname
     with socket.create_connection(("127.0.0.1", port), timeout=10) as raw:
-        with context.wrap_socket(raw, server_hostname="localhost") as stream:
+        with context.wrap_socket(raw, server_hostname=server_hostname) as stream:
             key = base64.b64encode(os.urandom(16)).decode()
-            request = (f"GET {state['ws_path']} HTTP/1.1\r\nHost: localhost:{port}\r\n"
+            request = (f"GET {state['ws_path']} HTTP/1.1\r\nHost: {host}:{port}\r\n"
                        f"Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n")
             stream.sendall(request.encode())
             headers = b""
@@ -81,6 +83,121 @@ def tunnel(port, context, state, user, origin_ip):
                     raise ValueError("unexpected websocket frame")
                 result += recv_exact(stream, size)
             assert result.startswith(b"\x00\x00HTTP/1."), result[:40]
+
+
+def ip_integration(root, data, identifier, containers, state, origin_ip):
+    """Adapt production ACME unchanged, then use a TEST CA only for local TLS.
+
+    Connect to loopback while verifying each public IP SAN. Python's TLS client
+    omits SNI for IP literals; default_sni must select the certificate even though
+    Caddy's container LocalAddr is a different private address.
+    """
+    for number, address in enumerate(("8.8.8.8", "2606:4700:4700::1111")):
+        directory = root / ("ip" + str(number))
+        directory.mkdir()
+        docker("run", "--rm", "--network", "none", "--entrypoint", "python",
+               "-v", f"{data}:/source:ro", "-v", f"{directory}:/ip", "-e", "TEST_IP=" + address, TOOL, "-c", """
+import json, os
+from pathlib import Path
+from proxy_stack.model import Settings
+from proxy_stack import render, rules
+settings = Settings(os.environ['TEST_IP'], 'IP Integration', port=8443)
+state = json.loads(Path('/source/model/state.json').read_text())
+for name, text in render.public_files(settings, state, rules.bootstrap()).items():
+    path = Path('/ip/public/current', name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+Path('/ip/Caddyfile').write_text(render.caddy(settings, state))
+Path('/ip/external.Caddyfile').write_text(render.caddy(settings, state, external=True))
+Path('/ip/host-caddy.snippet').write_text(render.snippet(settings))
+""")
+        for filename in ("Caddyfile", "host-caddy.snippet"):
+            adapted = json.loads(docker("run", "--rm", "--network", "none", "-v", f"{directory}:/etc/caddy:ro", CADDY,
+                                        "caddy", "adapt", "--config", "/etc/caddy/" + filename, "--adapter", "caddyfile"))
+            policies = adapted["apps"]["tls"]["automation"]["policies"]
+            assert len(policies) == 1 and policies[0]["subjects"] == [address]
+            assert policies[0]["issuers"] == [{"module": "acme", "ca": "https://acme-v02.api.letsencrypt.org/directory", "profile": "shortlived"}]
+            assert '"internal"' not in json.dumps(adapted)
+            for server in adapted["apps"]["http"]["servers"].values():
+                assert all(p["default_sni"] == address for p in server["tls_connection_policies"])
+            docker("run", "--rm", "--network", "none", "-v", f"{directory}:/etc/caddy:ro", CADDY,
+                   "caddy", "validate", "--config", "/etc/caddy/" + filename, "--adapter", "caddyfile")
+            if filename == "Caddyfile":
+                test_config = adapted
+        external = json.loads(docker("run", "--rm", "--network", "none", "-v", f"{directory}:/etc/caddy:ro", CADDY,
+                                     "caddy", "adapt", "--config", "/etc/caddy/external.Caddyfile", "--adapter", "caddyfile"))
+        assert "tls" not in external["apps"]
+        assert list(external["apps"]["http"]["servers"].values())[0]["listen"] == [":8080"]
+        owner_dir = directory / "public/current/sub" / state["users"]["owner"]["token"]
+        mihomo = directory / "mihomo"
+        shutil.copytree(owner_dir / "rules", mihomo / "rules")
+        shutil.copyfile(owner_dir / "clash.yaml", mihomo / "config.yaml")
+        docker("run", "--rm", "--network", "none", "-v", f"{mihomo}:/root/.config/mihomo", MIHOMO,
+               "-t", "-d", "/root/.config/mihomo", "-f", "/root/.config/mihomo/config.yaml")
+        # Only this disposable runtime config uses an internal CA. The production
+        # render above is inspected AND validated without any network access.
+        test_config["apps"]["tls"]["automation"]["policies"][0]["issuers"] = [{"module": "internal"}]
+        test_config["apps"]["pki"] = {"certificate_authorities": {"local": {"install_trust": False}}}
+        test_config["logging"] = {"logs": {"default": {"level": "DEBUG"}}}
+        config = directory / "test.json"
+        config.write_text(json.dumps(test_config))
+        cert_data = directory / "cert-data"
+        cert_data.mkdir()
+        name = identifier + "-ip" + str(number)
+        containers.append(name)
+        docker("run", "-d", "--name", name, "--network", identifier, "--read-only", "--cap-drop=ALL",
+               "--cap-add=NET_BIND_SERVICE", "-p", "127.0.0.1::8443", "-v", f"{config}:/etc/caddy/test.json:ro",
+               "-v", f"{directory / 'public'}:/srv/public:ro", "-v", f"{cert_data}:/data", "--tmpfs", "/config",
+               CADDY, "caddy", "run", "--config", "/etc/caddy/test.json")
+        ca = cert_data / "caddy/pki/authorities/local/root.crt"
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            ports = json.loads(docker("inspect", name))[0]["NetworkSettings"]["Ports"]
+            if ca.exists() and ports.get("8443/tcp"):
+                break
+            time.sleep(0.1)
+        else:
+            raise RuntimeError("IP TLS test gateway not ready")
+        port = int(ports["8443/tcp"][0]["HostPort"])
+        assert port > 1024
+        context = ssl.create_default_context(cafile=str(ca))
+        # The CA file exists before async certificate issuance/cache loading ends.
+        # Wait for a verified handshake, never mistake CA creation for readiness.
+        deadline = time.monotonic() + 20
+        while True:
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=2) as raw:
+                    with context.wrap_socket(raw, server_hostname=address):
+                        break
+            except ssl.SSLCertVerificationError:
+                raise
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.1)
+        host = "[" + address + "]" if ":" in address else address
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as raw:
+            with context.wrap_socket(raw, server_hostname=address) as stream:
+                assert any(kind == "IP Address" and ipaddress.ip_address(value) == ipaddress.ip_address(address)
+                           for kind, value in stream.getpeercert()["subjectAltName"])
+                stream.sendall(("GET /sub/" + state["users"]["owner"]["token"] + "/clash.yaml HTTP/1.1\r\nHost: "
+                                + host + ":8443\r\nConnection: close\r\n\r\n").encode())
+                response = http.client.HTTPResponse(stream)
+                response.begin()
+                assert response.status == 200
+                assert json.loads(response.read())["proxies"][0]["server"] == address
+        for bad_context, hostname in ((context, "1.1.1.1"), (ssl.create_default_context(), address)):
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=10) as raw:
+                    with bad_context.wrap_socket(raw, server_hostname=hostname):
+                        raise AssertionError("wrong SAN or untrusted chain accepted")
+            except ssl.SSLCertVerificationError:
+                pass
+        tunnel(port, context, state, state["users"]["owner"], origin_ip, server_hostname=address)
+        hellos = [json.loads(line)["data"]["client_hello"] for line in docker("logs", name).splitlines()
+                  if '"name":"tls_get_certificate"' in line]
+        assert hellos and all(hello["ServerName"] == "" for hello in hellos)
+        print("PASS: " + address + " native ACME/no local issuer, Mihomo, IP SAN chain, no-SNI HTTPS/VLESS; wrong SAN/untrusted CA rejected")
 
 
 def main():
@@ -259,6 +376,7 @@ else: raise RuntimeError('test Xray not ready')
             tunnel(tls_port, context, state, state["users"]["owner"], origin_ip)
             tunnel(tls_port, context, state, state["users"]["alice"], origin_ip)
             print("PASS: actual TLS + WebSocket + VLESS TCP egress for owner and friend")
+            ip_integration(root, data, identifier, containers, state, origin_ip)
             old = state["users"]["alice"]
             manager("user", "revoke", "alice")
             assert request("/sub/" + old["token"] + "/clash.yaml")[0] == 404

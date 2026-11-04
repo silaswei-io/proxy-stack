@@ -17,6 +17,26 @@ def username(value):
     return value
 
 
+def public_ip(value):
+    if "%" in value:
+        raise ValueError("IP zone IDs are unsupported")
+    address = ipaddress.ip_address(value)
+    if (not address.is_global or address.is_multicast or address.is_reserved
+            or address.is_unspecified or getattr(address, "ipv4_mapped", None)):
+        raise ValueError("IP must be global unicast")
+    return address
+
+
+def default_node_name(hostname):
+    """Sanitize only derived names. Never read the tool container's hostname."""
+    name = "".join(c if c.isalnum() or c in " ._-()" else "_" for c in hostname[:1024]).strip()[:80].strip()
+    if not name or not any(c.isalnum() for c in name):
+        name = "Server"
+    if name.lower() in ("proxy", "direct", "reject", POLICY.lower()):
+        name = "Server-" + name
+    return name
+
+
 @dataclass(frozen=True)
 class Settings:
     domain: str
@@ -29,7 +49,7 @@ class Settings:
     @classmethod
     def from_env(cls):
         domain = os.environ.get("DOMAIN", "").lower()
-        name = os.environ.get("NODE_NAME", "") or domain
+        name = os.environ.get("NODE_NAME", "") or default_node_name(os.environ.get("HOST_NODE_NAME", "") or domain)
         port = int(os.environ.get("PUBLIC_PORT", "443"))
         mode = os.environ.get("MODE", "standalone")
         email = os.environ.get("CONTACT_EMAIL", "")
@@ -39,7 +59,11 @@ class Settings:
     def __post_init__(self):
         domain, name, port, mode, email, interval = self.domain, self.node_name, self.port, self.mode, self.email, self.interval
         if not DOMAIN.fullmatch(domain):
-            raise ValueError("DOMAIN must be an ASCII DNS hostname (no scheme/path/port)")
+            try:
+                address = public_ip(domain)
+            except ValueError:
+                raise ValueError("DOMAIN must be an ASCII DNS hostname or global public IP (no scheme/path/port/brackets/zone)") from None
+            object.__setattr__(self, "domain", str(address))
         # QX comma-delimited tag syntax has no universally supported quoting.
         if not name or name != name.strip() or len(name) > 80 or any(not (c.isalnum() or c in " ._-()") for c in name):
             raise ValueError("NODE_NAME contains unsupported configuration characters")
@@ -53,8 +77,20 @@ class Settings:
             raise ValueError("invalid CONTACT_EMAIL")
 
     @property
+    def ip(self):
+        try:
+            return ipaddress.ip_address(self.domain)
+        except ValueError:
+            return None
+
+    @property
+    def host(self):
+        """Authority/Host syntax; raw proxy server addresses remain unbracketed."""
+        return "[" + self.domain + "]" if self.ip and self.ip.version == 6 else self.domain
+
+    @property
     def origin(self):
-        return "https://" + self.domain + (":" + str(self.port) if self.port != 443 else "")
+        return "https://" + self.host + (":" + str(self.port) if self.port != 443 else "")
 
 
 @dataclass(frozen=True)
@@ -111,7 +147,10 @@ def parse_entry(value, policy):
 def groups(settings, lists):
     """Order here is the sole routing authority for both clients."""
     result = [("force-proxy", [Rule("exact", x, POLICY) for x in ("api.ip.sb", "ipapi.co", "api.ipapi.is", "ipwho.is")])]
-    result.append(("bootstrap", [Rule("exact", settings.domain, "DIRECT"), Rule("exact", "localhost", "DIRECT"), Rule("suffix", "local", "DIRECT"), Rule("suffix", "lan", "DIRECT")]))
+    address = settings.ip
+    bootstrap = (Rule("ip4" if address.version == 4 else "ip6", str(address) + ("/32" if address.version == 4 else "/128"), "DIRECT")
+                 if address else Rule("exact", settings.domain, "DIRECT"))
+    result.append(("bootstrap", [bootstrap, Rule("exact", "localhost", "DIRECT"), Rule("suffix", "local", "DIRECT"), Rule("suffix", "lan", "DIRECT")]))
     for name in ("private", "lancidr", "apple", "icloud", "proxy", "direct", "cncidr"):
         policy = POLICY if name == "proxy" else "DIRECT"
         entries = [parse_entry(x, policy) for x in lists[name]]

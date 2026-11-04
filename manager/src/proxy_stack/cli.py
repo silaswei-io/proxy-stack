@@ -11,7 +11,7 @@ import urllib.error
 import urllib.request
 
 from . import __version__
-from .model import Settings, username
+from .model import Settings, default_node_name, username
 from .rules import download
 from .storage import Store
 
@@ -96,6 +96,8 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("installer", help="emit a self-contained Bash installer on stdout")
     sub.add_parser("validate-input", help="validate installer inputs without writing data")
+    sub.add_parser("detect-public-ip", help="detect a global public IP with bounded HTTPS probes")
+    sub.add_parser("default-node-name", help="sanitize the host-provided hostname")
     sub.add_parser("init")
     links = sub.add_parser("links")
     links.add_argument("--user", default="owner", type=username)
@@ -116,7 +118,12 @@ def main(argv=None):
         return 0
     store = Store(os.environ.get("PROXY_STACK_DATA", "/data"))
     try:
-        if args.command == "validate-input":
+        if args.command == "detect-public-ip":
+            from .discovery import detect_public_ip
+            print(detect_public_ip())
+        elif args.command == "default-node-name":
+            print(default_node_name(os.environ.get("HOST_NODE_NAME", "")))
+        elif args.command == "validate-input":
             Settings.from_env()
         elif args.command == "init":
             store.init(Settings.from_env())
