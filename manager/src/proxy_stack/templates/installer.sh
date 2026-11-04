@@ -9,6 +9,9 @@ join_code_file= join_code= prepare_only=false non_interactive=false check_only=f
 manage_host=false repeat=false host_route=false http_port=80 http_bind=0.0.0.0
 committed=false project= phase=preflight recover_only=false reconfigure=false namespace_change=false
 fail() { printf 'proxy-stack: %s\n' "$*" >&2; exit 1; }
+firewall_notice() {
+  printf '公网放行：云安全组和宿主防火墙需允许 TCP 80（证书签发/续期）及 TCP %s（订阅/代理）；有 NAT 时还需端口映射。工具不会自动开放防火墙。\n' "$1"
+}
 usage() {
   printf '%s\n' 'Usage: bash installer.sh [--domain DOMAIN --name NAME --port PORT] [--directory PATH]' \
     '  [--role hub|hub-only|node] [--join-code-file PATH] [--mode auto|standalone|existing-caddy]' \
@@ -147,7 +150,7 @@ if [ -e "$directory/$marker" ] || [ -L "$directory/$marker" ]; then
     ghcr.io/silaswei/proxy-stack:v1.0.0) namespace_change=true ;;
     *) fail '自定义工具镜像需手动迁移；原安装未改变。' ;;
   esac
-  previous_mode=$mode
+  previous_mode=$mode installed_port=$port
   [ -z "$requested_domain" ] || domain=$requested_domain
   [ -z "$requested_name" ] || node_name=$requested_name
   [ -z "$requested_port" ] || port=$requested_port
@@ -160,7 +163,11 @@ if [ -e "$directory/$marker" ] || [ -L "$directory/$marker" ]; then
   valid_port "${port:-443}" && valid_port "$http_port" || fail '受管端口配置无效；保留原文件。'
   [[ "$project" =~ ^proxy-stack-[a-zA-Z0-9_-]+$ ]] || fail '受管 Compose 标识无效。'
   printf '已有受管 v1.0.0；预检重试/重配，保留身份。\n'
-  if $prepare_only && ! $namespace_change && ! $check_only && [ -z "$requested_domain$requested_name$requested_port$requested_role" ] && [ "$requested_mode" = auto ]; then printf '菜单：%q menu\n' "$directory/proxyctl"; exit 0; fi
+  if $prepare_only && ! $namespace_change && ! $check_only && [ -z "$requested_domain$requested_name$requested_port$requested_role" ] && [ "$requested_mode" = auto ]; then
+    printf '菜单：%q menu\n' "$directory/proxyctl"
+    firewall_notice "$installed_port"
+    exit 0
+  fi
 elif [ -e "$directory" ]; then
   [ -d "$directory" ] || fail '安装目标不是目录。'
   shopt -s nullglob dotglob; entries=("$directory"/*); shopt -u nullglob dotglob
@@ -317,6 +324,7 @@ valid_port "$port" || fail '端口需为 1–65535 的数字。'; port=$((10#$po
 [ "$port" -ne 80 ] || fail '公共 HTTPS 端口不能使用 HTTP-01 所需的 80。'
 domain=$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]')
 domain=$(timeout 15 docker run --rm --read-only --cap-drop=ALL --network none -e "DOMAIN=$domain" -e "NODE_NAME=$node_name" -e "PUBLIC_PORT=$port" "$tool_image" validate-input 2>>"$operator_log") || fail '域名、公网 IP、名称或端口无效；安装目录未写入。'
+firewall_notice "$port"
 quiet timeout 20 docker run --rm --read-only --cap-drop=ALL --network bridge -e "DOMAIN=$domain" -e "NODE_NAME=$node_name" "$tool_image" check-address || fail '地址映射预检失败；安装目录未写入。'
 if port_available "$port"; then
   if ! $prepare_only; then public_roundtrip || fail "所选 HTTPS 端口 $port 的公共地址回环失败；检查防火墙/云安全组、NAT/回环支持。原安装和宿主配置未改变。日志：$operator_log"; fi
@@ -407,7 +415,7 @@ if $host_route; then
   if $non_interactive && ! $manage_host && ! $check_only; then fail '此计划需要 --manage-host-caddy 显式授权宿主 HTTP-01 集成。'; fi
 fi
 printf '计划：%s；HTTPS %s:%s；HTTP-01 %s:%s。\n' "$role" "$domain" "$port" "$http_bind" "$http_port"
-printf '目标：%s；公网防火墙/NAT 需允许 80 和 %s。\n' "$directory" "$port"
+printf '目标：%s。\n' "$directory"
 if $check_only; then printf '预检通过；未写入安装目录，未激活服务。\n计划日志：%s\n' "$operator_log"; exit 0; fi
 if { $host_route || { $repeat && $reconfigure; }; } && ! $non_interactive; then
   prompt confirmation '按此计划安装/重配（含计划中的宿主 HTTP 路由）？[y/N]: '
@@ -656,3 +664,4 @@ else
 fi
 if $prepare_only; then printf '菜单：%q menu\n' "$directory/proxyctl"; fi
 printf '安装日志/恢复记录：%s\n' "$stage"
+firewall_notice "$port"

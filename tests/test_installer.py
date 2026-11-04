@@ -316,12 +316,26 @@ class InstallerTests(unittest.TestCase):
     def assert_ok(self, result):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
+    def assert_firewall_notice(self, output, port, count):
+        notices = [line for line in output.splitlines() if line.startswith('公网放行：')]
+        self.assertEqual(len(notices), count, output)
+        for notice in notices:
+            self.assertIn('云安全组和宿主防火墙', notice)
+            self.assertIn('TCP 80（证书签发/续期）', notice)
+            self.assertIn(f'TCP {port}（订阅/代理）', notice)
+            self.assertIn('NAT', notice)
+            self.assertIn('端口映射', notice)
+            self.assertIn('不会自动开放防火墙', notice)
+
     def test_export_is_only_bash_and_templates_match_payload(self):
         exported = subprocess.check_output([sys.executable, "-m", "proxy_stack.cli", "installer"], text=True)
         self.assertEqual(exported, self.payload)
         self.assertTrue(exported.startswith("#!/usr/bin/env bash\n"))
         subprocess.run(["bash", "-n"], input=exported, text=True, check=True)
-        self.assert_ok(self.install("--prepare-only"))
+        prepared = self.install("--prepare-only")
+        self.assert_ok(prepared)
+        self.assert_firewall_notice(prepared.stdout, 34567, 2)
+        self.assertTrue(prepared.stdout.splitlines()[-1].startswith('公网放行：'))
         templates = files("proxy_stack").joinpath("templates")
         for name in ("compose.yaml", "compose.external.yaml", ".env.example", "proxyctl"):
             self.assertEqual((self.destination / name).read_text(), templates.joinpath(name).read_text())
@@ -337,6 +351,8 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("等待就绪节点回执", result.stdout)
         self.assertIn("minimal-bootstrap", result.stdout)
         self.assertIn("proxyctl' menu", result.stdout)
+        self.assert_firewall_notice(result.stdout, 34567, 2)
+        self.assertTrue(result.stdout.splitlines()[-1].startswith('公网放行：'))
         state = json.loads((self.destination / "data/model/state.json").read_text())
         self.assertEqual(state["settings"]["node_name"], "测试 VPS")
         project = next(line for line in (self.destination / '.env').read_text().splitlines()
@@ -975,6 +991,10 @@ class InstallerTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('公共地址回环失败', result.stderr)
             self.assertIn('NAT', result.stderr)
+            port = 34567 if args else int(next(a.split('=', 1)[1] for c in self.calls()
+                                             for a in c if a.startswith('ROUNDTRIP_PORT=')))
+            self.assert_firewall_notice(result.stdout, port, 1)
+            self.assertIn(f'HTTPS 端口 {port}', result.stderr)
             self.assertFalse(self.destination.exists())
             self.assertFalse(Path(str(self.destination) + '.install-lock').exists())
             self.assertEqual(host.config.read_bytes(), original)
@@ -990,6 +1010,8 @@ class InstallerTests(unittest.TestCase):
         before = (self.destination / 'data/model/state.json').read_bytes()
         result = self.install('--port', '45678', env=dict(self.env, FAKE_ROUNDTRIP_FAIL='1'))
         self.assertNotEqual(result.returncode, 0)
+        self.assert_firewall_notice(result.stdout, 45678, 1)
+        self.assertIn('HTTPS 端口 45678', result.stderr)
         self.assertEqual((self.destination / 'data/model/state.json').read_bytes(), before)
 
     def test_roundtrip_interruption_cleans_listener_and_probe_before_mutation(self):
@@ -1031,20 +1053,48 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(sum('-p' in c for c in self.calls()), 24)
 
     def test_random_port_default_is_available_and_persisted(self):
-        result = self.install('--prepare-only', inputs=False)
+        from proxy_stack.storage import Store
+
+        def assert_port_urls(result, state, port):
+            token = state['users']['owner']['token']
+            origin = f"https://8.8.8.8:{port}"
+            self.assertIn(origin + '/' + token + '/clash', result.stdout)
+            current = Store(self.destination / 'data').current()
+            clash = json.loads((current / f'sub/{token}/clash.yaml').read_text())
+            self.assertTrue(clash['rule-providers'])
+            for provider in clash['rule-providers'].values():
+                self.assertTrue(provider['url'].startswith(origin + '/' + token + '/rules/'))
+            self.assertEqual(clash['proxies'][0]['port'], port)
+            self.assert_firewall_notice(result.stdout, port, 2)
+            self.assertTrue(result.stdout.splitlines()[-1].startswith('公网放行：'))
+
+        result = self.install(inputs=False)
         self.assert_ok(result)
         state = json.loads((self.destination / 'data/model/state.json').read_text())
         self.assertGreaterEqual(state['settings']['port'], 20000)
         self.assertLess(state['settings']['port'], 60000)
         self.assertTrue(state['settings']['http01_only'])
+        assert_port_urls(result, state, state['settings']['port'])
         before = (self.destination / '.env').read_bytes()
-        self.assert_ok(self.install('--prepare-only', inputs=False))
+        prepared = self.install('--prepare-only', inputs=False)
+        self.assert_ok(prepared)
+        self.assert_firewall_notice(prepared.stdout, state['settings']['port'], 1)
+        self.assertTrue(prepared.stdout.splitlines()[-1].startswith('公网放行：'))
         self.assertEqual((self.destination / '.env').read_bytes(), before)
-        self.assert_ok(self.install('--port', '12345', inputs=False))
+        result = self.install('--port', '12345', inputs=False)
+        self.assert_ok(result)
         changed = json.loads((self.destination / 'data/model/state.json').read_text())
         self.assertEqual(changed['settings']['port'], 12345)
         self.assertEqual(changed['users'], state['users'])
         self.assertEqual(changed['ws_path'], state['ws_path'])
+        assert_port_urls(result, changed, 12345)
+        result = self.install(inputs=False)
+        self.assert_ok(result)
+        persisted = json.loads((self.destination / 'data/model/state.json').read_text())
+        self.assertEqual(persisted['settings']['port'], 12345)
+        self.assertEqual(persisted['users'], state['users'])
+        self.assertEqual(persisted['ws_path'], state['ws_path'])
+        assert_port_urls(result, persisted, 12345)
 
     def test_init_failure_cleans_own_network_before_up_and_preserves_private_backup(self):
         result = self.install(env=dict(self.env, FAKE_INIT_FAIL='1'))
