@@ -1,24 +1,24 @@
 name: release-tool
 on:
   push:
-    tags: [v0.1.2]
+    branches: [main]
   workflow_dispatch:
 permissions:
   contents: read
   packages: write
 concurrency:
-  group: release-tool-0.1.2
+  group: release-tool-V1
   cancel-in-progress: false
 jobs:
   publish:
-    if: github.repository == 'silaswei/proxy-stack'
+    if: github.repository == 'silaswei/proxy-stack' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Build and test before publication
         run: |
-          docker build -t proxy-stack-tool:0.1.2 -f manager/Dockerfile .
-          docker run --rm --entrypoint python -v "$PWD/tests:/tests:ro" proxy-stack-tool:0.1.2 -m unittest discover -s /tests -v
+          docker build -t proxy-stack-tool:V1 -f manager/Dockerfile .
+          docker run --rm --entrypoint python -v "$PWD/tests:/tests:ro" proxy-stack-tool:V1 -m unittest discover -s /tests -v
           sudo python3 tests/integration/run.py
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -34,9 +34,19 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/silaswei/proxy-stack:0.1.2
             ghcr.io/silaswei/proxy-stack:sha-${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/silaswei/proxy-stack
-            org.opencontainers.image.version=0.1.2
+            org.opencontainers.image.version=V1
             org.opencontainers.image.revision=${{ github.sha }}
+      - name: Advance V1 only for the current main revision
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          current=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$current" != "$EXPECTED_SHA" ]; then
+            echo "A newer main revision exists; immutable revision retained, V1 unchanged."
+            exit 0
+          fi
+          docker buildx imagetools create --tag ghcr.io/silaswei/proxy-stack:V1 \
+            "ghcr.io/silaswei/proxy-stack:sha-$EXPECTED_SHA"

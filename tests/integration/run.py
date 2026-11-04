@@ -2,7 +2,7 @@
 """Disposable Docker integration; only loopback ephemeral high ports are published.
 
 No GitHub access or real deployment inputs are needed. Existing containers are not
-touched. The tool image must first be built as proxy-stack-tool:0.1.2.
+touched. The tool image must first be built as proxy-stack-tool:V1.
 On Linux with rootful Docker, run with sudo: both the bind-mount ownership and
 host Python's access to generated root-owned 0700 directories require root.
 """
@@ -12,6 +12,7 @@ import http.client
 import ipaddress
 import json
 import os
+import re
 import shutil
 import socket
 import ssl
@@ -24,7 +25,7 @@ import uuid
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-TOOL = os.environ.get("TEST_TOOL_IMAGE", "proxy-stack-tool:0.1.2")
+TOOL = os.environ.get("TEST_TOOL_IMAGE", "proxy-stack-tool:V1")
 XRAY = os.environ.get("TEST_XRAY_IMAGE", "ghcr.io/xtls/xray-core:26.7.11@sha256:a1644183accdb0b5be967093fe34be756fd5de15fe2ee0206e842ae17350967f")
 CADDY = os.environ.get("TEST_CADDY_IMAGE", "caddy:2.11.4@sha256:0c994536bddb66445885237f1a5dcc1916bccea922661c76b4e9fc24061f9b52")
 MIHOMO = os.environ.get("TEST_MIHOMO_IMAGE", "metacubex/mihomo:v1.19.15@sha256:da91cd45f1c96fe964982d7bcf3e7252d122022c65694365f3cd36c76e2d2ebd")
@@ -103,6 +104,8 @@ from proxy_stack.model import Settings
 from proxy_stack import render, rules
 settings = Settings(os.environ['TEST_IP'], 'IP Integration', port=8443)
 state = json.loads(Path('/source/model/state.json').read_text())
+from dataclasses import asdict
+state['nodes']['local']['settings'] = asdict(settings)
 for name, text in render.public_files(settings, state, rules.bootstrap()).items():
     path = Path('/ip/public/current', name)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -215,26 +218,33 @@ def main():
            "t=files('proxy_stack').joinpath('templates'); "
            "assert all(Path('/source', n).read_bytes()==t.joinpath(n).read_bytes() "
            "for n in ('compose.yaml','compose.external.yaml','.env.example','proxyctl'))")
-    environment = dict(os.environ, DOMAIN="proxy.example.com", MODE="standalone")
-    for external in (False, True):
-        command = ["docker", "compose", "--env-file", ".env.example", "--profile", "tools", "-f", "compose.yaml"]
-        if external:
-            command += ["-f", "compose.external.yaml"]
-        layout = json.loads(subprocess.check_output(command + ["config", "--format", "json"], cwd=REPO, env=environment))
-        services = layout["services"]
-        assert services["manager"]["image"] == services["updater"]["image"]
-        assert services["manager"]["tmpfs"] == ["/tmp:size=64m,mode=1777"]
-        assert not services["xray"].get("ports")
-        for service in services.values():
-            assert not service.get("privileged") and service.get("network_mode") != "host"
-            assert not any("docker.sock" in mount.get("source", "") for mount in service.get("volumes", []))
-        mounts = {mount["target"]: mount for mount in services["updater"]["volumes"]}
-        assert mounts["/data/model"]["read_only"]
-        assert set(mounts) == {"/data/model", "/data/public", "/data/cache", "/data/locks"}
-        if external:
-            ports = services["caddy"]["ports"]
-            assert len(ports) == 1 and ports[0]["host_ip"] == "127.0.0.1" and ports[0]["published"] == "18090" and ports[0]["target"] == 8080
-    print("PASS: both Compose layouts and container isolation invariants")
+    for role, local in (("hub", "true"), ("hub", "false"), ("node", "true")):
+        environment = dict(os.environ, DOMAIN="proxy.example.com", MODE="standalone", ROLE=role, LOCAL_NODE=local)
+        for external in (False, True):
+            command = ["docker", "compose", "--env-file", ".env.example", "--profile", "tools", "-f", "compose.yaml"]
+            if external:
+                command += ["-f", "compose.external.yaml"]
+            layout = json.loads(subprocess.check_output(command + ["config", "--format", "json"], cwd=REPO, env=environment))
+            services = layout["services"]
+            assert services["manager"]["image"] == services["updater"]["image"]
+            assert services["manager"]["tmpfs"] == ["/tmp:size=64m,mode=1777"]
+            assert not services["xray"].get("ports") and not services["hub"].get("ports")
+            assert services['xray']['command'] == ['runtime']
+            assert services['hub']['command'] == ['hub-api']
+            assert services['xray']['image'] == services['hub']['image'] == services['manager']['image']
+            assert services['xray']['environment']['ROLE'] == role
+            assert services['xray']['environment']['LOCAL_NODE'] == local
+            for service in services.values():
+                assert service.get("cap_drop") == ["ALL"]
+                assert not service.get("privileged") and service.get("network_mode") != "host"
+                assert not any("docker.sock" in mount.get("source", "") for mount in service.get("volumes", []))
+            mounts = {mount["target"]: mount for mount in services["updater"]["volumes"]}
+            assert mounts["/data/model"]["read_only"]
+            assert set(mounts) == {"/data/model", "/data/public", "/data/cache", "/data/locks"}
+            if external:
+                ports = services["caddy"]["ports"]
+                assert len(ports) == 1 and ports[0]["host_ip"] == "127.0.0.1" and ports[0]["published"] == "18090" and ports[0]["target"] == 8080
+    print("PASS: both Compose layouts, all V1 roles and container isolation invariants")
     identifier = "proxy-stack-test-" + uuid.uuid4().hex[:12]
     containers = []
     with tempfile.TemporaryDirectory(prefix="proxy-stack-test-") as temporary:
@@ -293,26 +303,36 @@ def main():
             # Never weaken the generated production config for this test.
             test_xray = root / "test-xray"
             test_xray.mkdir(mode=0o755)
-            def sync_test_xray():
-                config = json.loads((data / "runtime/xray/config.json").read_text())
-                config["outbounds"][0]["settings"] = {"finalRules": [{"action": "allow", "network": "tcp", "port": "8000", "ip": [origin_ip]}]}
-                (test_xray / "config.json").write_text(json.dumps(config))
-            sync_test_xray()
+            wrapper = test_xray / "xray-test"
+            wrapper.write_text("#!/usr/local/bin/python\nimport json,os,sys\nfrom pathlib import Path\n"
+                               "args=sys.argv[1:];p=Path(args[args.index('-config')+1]);c=json.loads(p.read_text())\n"
+                               "c['outbounds'][0]['settings']={'finalRules':[{'action':'allow','network':'tcp','port':'8000','ip':["
+                               + repr(origin_ip) + "]}]}\np.write_text(json.dumps(c))\n"
+                               "os.execv('/usr/local/bin/xray',['xray']+args)\n")
+            wrapper.chmod(0o755)
             xray = identifier + "-xray"
             containers.append(xray)
+            runtime_code = ("import signal,threading; from proxy_stack.storage import Store; from proxy_stack.runtime import Runtime,Supervisor; "
+                            "s=Store('/data'); stop=threading.Event(); signal.signal(signal.SIGTERM,lambda *_:stop.set()); "
+                            "Runtime(s,Supervisor(s.runtime/'xray','/test/xray-test')).run(stop)")
             docker("run", "-d", "--name", xray, "--network", identifier, "--network-alias", "xray",
-                   "--read-only", "--cap-drop=ALL", "-v", f"{test_xray}:/etc/xray:ro", XRAY,
-                   "run", "-config", "/etc/xray/config.json")
+                   "--read-only", "--cap-drop=ALL", "-v", f"{data}:/data", "-v", f"{test_xray}:/test:ro",
+                   "--entrypoint", "python", TOOL, "-c", runtime_code)
             def wait_xray():
-                docker("run", "--rm", "--network", identifier, "--entrypoint", "python", TOOL, "-c", """import socket,time
-for attempt in range(100):
-    try:
-        with socket.create_connection(('xray',10000),timeout=0.2): pass
-        break
-    except OSError: time.sleep(0.1)
-else: raise RuntimeError('test Xray not ready')
-""")
+                deadline = time.monotonic() + 20
+                while time.monotonic() < deadline:
+                    model = json.loads((data / 'model/state.json').read_text())
+                    node = model['nodes']['local']
+                    if node['ready'] and node['acked'] == node['desired']:
+                        return
+                    time.sleep(0.1)
+                raise AssertionError('supervised local node did not apply and acknowledge')
             wait_xray()
+            # The same exact control paths also work in the external-Caddy layout.
+            api = identifier + '-hub'
+            containers.append(api)
+            docker('run','-d','--name',api,'--network',identifier,'--network-alias','hub',
+                   '--read-only','--cap-drop=ALL','-v',f'{data}:/data',TOOL,'hub-api')
             caddy = identifier + "-caddy"
             containers.append(caddy)
             docker("run", "-d", "--name", caddy, "--network", identifier, "--network-alias", "caddy",
@@ -370,6 +390,11 @@ else: raise RuntimeError('test Xray not ready')
                              asset + "?extra=1", asset.replace("/clash.yaml", "/./clash.yaml"), asset.replace("/clash.yaml", "//clash.yaml")):
                     assert request(path, tls=tls)[0] == 404, path
                 assert request(asset, method="POST", tls=tls)[0] == 404
+                for control_path in ('poll','ack','detach'):
+                    # Empty POST bodies are rejected by the actual internal API,
+                    # proving Caddy forwards exact routes in HTTP and TLS modes.
+                    assert request('/control/v1/'+control_path,method='POST',tls=tls)[0] == 413
+                assert request('/control/v1/enroll',method='POST',tls=tls)[0] == 413
             print("PASS: exact GET/HEAD routes; denied unknown paths, traversal and directory listing; real TLS chain verified")
 
             context = ssl.create_default_context(cafile=str(ca))
@@ -380,8 +405,6 @@ else: raise RuntimeError('test Xray not ready')
             old = state["users"]["alice"]
             manager("user", "revoke", "alice")
             assert request("/sub/" + old["token"] + "/clash.yaml")[0] == 404
-            sync_test_xray()
-            docker("restart", xray)
             wait_xray()
             tunnel(tls_port, context, state, state["users"]["owner"], origin_ip)
             tunnel(tls_port, context, state, state["users"]["bob"], origin_ip)
@@ -390,8 +413,8 @@ else: raise RuntimeError('test Xray not ready')
             except (EOFError, ConnectionResetError, ssl.SSLError):
                 pass
             else:
-                raise AssertionError("revoked UUID still accepted after Xray restart")
-            print("PASS: revoked URL gone; revoked VLESS UUID rejected after restart; other users independent")
+                raise AssertionError("revoked UUID still accepted after supervised apply")
+            print("PASS: revoked URL gone; revoked VLESS UUID rejected after automatic apply; other users independent")
 
             # Test updater with exactly its production mounts, including read-only
             # model and no runtime/Xray mount. No live upstream network is used.
@@ -403,9 +426,11 @@ else: raise RuntimeError('test Xray not ready')
             assert (data / "runtime/xray/config.json").read_bytes() == before
             manager("verify", "--base-url", "http://caddy:8080")
             print("PASS: isolated offline updater refresh without private configuration writes")
+            from multinode import multinode_integration
+            multinode_integration(root, identifier, containers)
         except BaseException:
             for name in containers:
-                print("DIAGNOSTIC (disposable test container): " + name + "\n" + docker("logs", name, check=False), flush=True)
+                print("DIAGNOSTIC (disposable test container): " + name + "\n" + re.sub(r"(/sub/|/ws/)[0-9a-f]{48}", r"\1[redacted]", docker("logs", name, check=False)), flush=True)
             raise
         finally:
             for name in reversed(containers):

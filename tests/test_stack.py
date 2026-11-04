@@ -20,6 +20,7 @@ from proxy_stack.cli import serve
 from proxy_stack.model import POLICY, Rule, Settings, groups, parse_entry, username
 from proxy_stack.storage import Store
 from proxy_stack.storage import atomic_file
+from proxy_stack.topology import initialize
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -298,6 +299,9 @@ class RenderTests(unittest.TestCase):
         self.settings = Settings("proxy.example.com", "Fixture VPS")
         self.state = {"ws_path": "/ws/" + "b" * 48,
                       "users": {"owner": {"token": "a" * 48, "uuid": "00000000-0000-4000-8000-000000000001"}}}
+        self.state["settings"] = __import__("dataclasses").asdict(self.settings)
+        initialize(self.state)
+        self.state["nodes"]["local"].update(ready=True, acked=1)
         self.files = render.public_files(self.settings, self.state, rules.bootstrap())
         self.base = "sub/" + "a" * 48 + "/"
 

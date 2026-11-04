@@ -1,7 +1,7 @@
 """Pure renderers: never read state or perform network requests."""
 import json
 
-from .model import POLICY, groups
+from .model import POLICY, Settings, groups
 
 
 def encoded(value):
@@ -29,12 +29,27 @@ def caddy(settings, state, external=False):
     if settings.ip and not external:
         global_options += "    default_sni " + settings.domain + "\n"
     global_options += "}\n"
-    return global_options + f"""
+    result = global_options + f"""
 {site} {{
 {ip_tls(settings) if not external else ""}    @unsafe expression `{{http.request.orig_uri}}.contains("%") || {{http.request.orig_uri}}.contains("..") || {{http.request.orig_uri}}.contains("//") || {{http.request.orig_uri}}.contains("/./") || {{http.request.orig_uri}}.contains("?")`
     route {{
     handle @unsafe {{
         respond "Not found" 404
+    }}
+    @control {{
+        method POST
+        path /control/v1/enroll /control/v1/poll /control/v1/ack /control/v1/detach
+    }}
+    handle @control {{
+        request_body {{
+            max_size 64KB
+        }}
+        reverse_proxy hub:8090 {{
+            transport http {{
+                dial_timeout 3s
+                response_header_timeout 10s
+            }}
+        }}
     }}
     @tunnel path {state['ws_path']}
     handle @tunnel {{
@@ -62,6 +77,16 @@ def caddy(settings, state, external=False):
 }}
 """
 
+    if settings.role == "node":
+        start = result.index("    @control {")
+        end = result.index("    @tunnel path", start)
+        result = result[:start] + result[end:]
+    if settings.role == "hub" and (not settings.local_node or not state.get("nodes", {}).get("local", {}).get("enabled", True)):
+        start = result.index("    @tunnel path")
+        end = result.index("    @asset {", start)
+        result = result[:start] + result[end:]
+    return result
+
 
 def ip_tls(settings):
     if not settings.ip:
@@ -85,40 +110,53 @@ def snippet(settings):
 """
 
 
+def ready_nodes(settings, state):
+    return [(Settings(**node["settings"]), node["ws_path"]) for node in state["nodes"].values()
+            if node.get("enabled") and node.get("ready") and node.get("acked") == node.get("desired")]
+
+
 def public_files(settings, state, cache):
-    routing = groups(settings, cache["lists"])
+    endpoints = [Settings(**n["settings"]) for n in state.get("nodes", {}).values() if n.get("enabled")]
+    available = ready_nodes(settings, state)
+    routing = groups(settings, cache["lists"], endpoints)
     files = {}
     providers = {name: encoded({"payload": [r.clash() + (",no-resolve" if name == "bootstrap" and r.kind in ("ip4", "ip6") else "") for r in rules]}) for name, rules in routing}
     qx_rules = "\n".join(r.qx().replace(", DIRECT", ", direct") for _, rules in routing for r in rules) + "\n"
     for user in state["users"].values():
         base = "sub/" + user["token"] + "/"
         url = settings.origin + "/" + base
-        node = {"name": settings.node_name, "type": "vless", "server": settings.domain,
-                "port": settings.port, "uuid": user["uuid"], "network": "ws", "tls": True,
-                "servername": settings.domain, "skip-cert-verify": False, "udp": False,
-                "ws-opts": {"path": state["ws_path"], "headers": {"Host": settings.host}}}
-        if settings.ip:
-            del node["servername"]
+        nodes, qx_nodes = [], []
+        for endpoint, path in available:
+            node = {"name": endpoint.node_name, "type": "vless", "server": endpoint.domain,
+                    "port": endpoint.port, "uuid": user["uuid"], "network": "ws", "tls": True,
+                    "servername": endpoint.domain, "skip-cert-verify": False, "udp": False,
+                    "ws-opts": {"path": path, "headers": {"Host": endpoint.host}}}
+            if endpoint.ip:
+                del node["servername"]
+            nodes.append(node)
+            qx_nodes.append(f"vless={endpoint.host}:{endpoint.port}, method=none, password={user['uuid']}, "
+                            "obfs=wss, " + (f"obfs-host={endpoint.domain}, " if not endpoint.ip else "") +
+                            f"obfs-uri={path}, tls-verification=true, fast-open=false, udp-relay=false, tag={endpoint.node_name}\n")
+        names = [node["name"] for node in nodes]
         clash = {"mixed-port": 7890, "allow-lan": False, "mode": "rule", "log-level": "warning", "ipv6": False,
                  "dns": {"enable": True, "ipv6": False, "enhanced-mode": "fake-ip", "respect-rules": True,
                          "default-nameserver": ["223.5.5.5", "119.29.29.29"],
                          "proxy-server-nameserver": ["223.5.5.5", "119.29.29.29"],
                          "nameserver": ["223.5.5.5", "119.29.29.29"],
-                         "fake-ip-filter": [settings.domain, "*.lan", "*.local"]},
-                 "proxies": [node], "proxy-groups": [{"name": POLICY, "type": "select", "proxies": [settings.node_name]}],
+                         "fake-ip-filter": list(dict.fromkeys([settings.domain] + [e.domain for e in endpoints] + ["*.lan", "*.local"]))},
+                 "proxies": nodes, "proxy-groups": [{"name": POLICY, "type": "select", "proxies": names or ["REJECT"]}],
                  "rule-providers": {name: {"type": "http", "behavior": "classical", "format": "yaml", "interval": 86400,
                                              "url": url + "rules/" + name + ".yaml", "path": "./rules/" + name + ".yaml"} for name, _ in routing},
                  "rules": ["RULE-SET," + name + "," + rules[0].policy for name, rules in routing] + ["MATCH," + POLICY]}
         files[base + "clash.yaml"] = encoded(clash)
         for name, content in providers.items():
             files[base + "rules/" + name + ".yaml"] = content
-        files[base + "qx/nodes.txt"] = (
-            f"vless={settings.host}:{settings.port}, method=none, password={user['uuid']}, "
-            f"obfs=wss, " + (f"obfs-host={settings.domain}, " if not settings.ip else "") + f"obfs-uri={state['ws_path']}, "
-            f"tls-verification=true, fast-open=false, udp-relay=false, tag={settings.node_name}\n")
+        files[base + "qx/nodes.txt"] = "".join(qx_nodes)
         files[base + "qx/rules.list"] = qx_rules
-        files[base + "qx/full.conf"] = f"""# proxy-stack 0.1.2; QX native iOS import remains UNVERIFIED.
+        files[base + "qx/full.conf"] = f"""# proxy-stack V1; QX native iOS import remains UNVERIFIED.
 # Rules: {cache['quality']}; URLs below are private credentials.
+# No ready nodes means normally proxied traffic is REJECTED.
+# Ready nodes: {len(nodes)}. If zero, wait for node startup/ack and check proxyctl node list.
 [general]
 server_check_url = http://www.apple.com/generate_204
 
@@ -128,7 +166,7 @@ server = 223.5.5.5
 server = 119.29.29.29
 
 [policy]
-static = {POLICY}, {settings.node_name}
+static = {POLICY}, {", ".join(names) if names else "reject"}
 
 [server_remote]
 {url}qx/nodes.txt, tag=proxy-stack-node, update-interval=86400, enabled=true

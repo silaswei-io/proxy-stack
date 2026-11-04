@@ -1,194 +1,119 @@
-# proxy-stack 0.1.2
+# proxy-stack V1
 
-已安装 Docker 的服务器上运行：
+一个订阅中心管理多台机器。每位朋友各有稳定订阅 URL 和独立 UUID；同一个 Mihomo/Clash Meta 或 Quantumult X 订阅包含所有已就绪节点。国内、局域网、Apple/iCloud 直连，其余走 `VPS` 节点组。没有就绪节点时，默认代理流量被拒绝，避免意外直连。
 
-```sh
-docker run --rm ghcr.io/silaswei/proxy-stack:0.1.2 installer | bash
-```
+## 安装
 
-两个提示都可直接按 **Enter**：地址默认使用探测到的服务器**公网 IP**，节点名称默认使用**宿主机 hostname**（自动清理不支持的字符）。也可输入自定义域名/公网 IPv4/IPv6、节点名称。工具会生成配置和独立凭据、启动服务，并显示带标签的 owner 私密订阅。默认目录为 root 的 `/opt/proxy-stack`，普通用户的 `~/proxy-stack`；不需要 git、宿主机 Python、手改 `.env` 或 Docker socket 挂载。默认问答示例（两次回车；提示中会显示实际默认值）：
-
-```text
-代理域名或公网 IP（回车使用 <探测到的公网 IP>）: <Enter>
-节点名称（回车使用 <宿主机名>）: <Enter>
-```
-
-安装结束显示绝对路径的中文管理菜单命令，例如：
+服务器只需 Docker Engine 和 Compose **≥ 2.24.4**，不需要宿主机 Python 或 git：
 
 ```sh
-/opt/proxy-stack/proxyctl menu
+docker run --pull=always --rm ghcr.io/silaswei/proxy-stack:V1 installer | bash
 ```
 
-菜单可以查看自己的订阅、添加/撤销朋友、查看服务及规则状态、刷新规则。朋友标识使用英文/拼音；添加或撤销会重启 Xray、中断现有连接。重复安装只打开已有受管目录的菜单（无终端则显示已有链接），保留 `.env`、数据、UUID、token 和模板；拒绝非空未受管目录及符号链接路径。安装中断后可在原目录执行 `./proxyctl init`，再 `./proxyctl up`，不会生成替换已有凭据。
+向导提供三个选择：创建中心并同时运行节点、仅创建订阅中心、加入已有中心。地址默认探测到的公网 IP，可改为域名；节点名默认使用宿主机 hostname。IP 无需域名/DNS，但仍需可从公网访问。不能填写私网、回环或保留地址。
 
-每次新安装在 `.env` 保存独立 Compose 项目名；受管目录的包装器使用自己的 `.env`，忽略当前 shell 中继承的部署/Compose 配置变量，避免影响其他项目。更改部署设置仍需遵循已有设置不可静默迁移的约束。
-
-纯 IP 模式**不需要域名或 DNS**：使用 Let’s Encrypt 公网 IP 证书，显式选择 `shortlived` ACME profile（约 160 小时有效期），不会使用本地 CA 或关闭客户端证书验证。公网 TCP 80/443 必须可达，且持续满足自动续期要求；探测到的出口 IP 还必须能从公网路由到本机，NAT/防火墙不会由工具自动解决。域名模式则需 A/AAAA 指向服务器、CAA 允许 ACME。**Docker 启动成功不代表 TLS 或外部可达性已验证**；安装后按提示等待证书和完整规则，再用菜单查看状态、运行 `proxyctl verify`。初始规则是小型 `minimal-bootstrap`，`rules=upstream` 才表示完整规则已发布。安装器先取得链接再启动 updater，收尾不会等待首次完整规则刷新锁。
-
-80/443 无法绑定时会询问是否使用已有反代模式，仅绑定 `127.0.0.1:18090`，并检查该端口；工具不会停止、覆盖现有服务或修改防火墙/DNS。需手动审查生成的 `data/runtime/host-caddy.snippet`，让主机反代为该地址提供 HTTPS 并指向此网关，完成前公共链接不可用；Nginx 等反代需自行提供等效配置。没有自动适配所有反代环境。
-
-[GHCR 通用镜像](https://github.com/users/silaswei/packages/container/package/proxy-stack) 已公开，可匿名拉取；源码仓库继续保持私有。镜像不包含实际部署凭据。
-
-无终端使用 `--non-interactive`；省略地址和名称时同样自动探测公网 IP、采用宿主机名。探测只通过临时工具容器向固定 HTTPS 服务发出限时请求（总计最多 12 秒），不使用私网/默认路由地址。探测失败会提示使用 `--domain`；显式参数会跳过探测，可离线初始化。可先只初始化（不启动服务，仍检查端口）：
+在第一台机器建立中心，等待 HTTPS 证书就绪，然后运行：
 
 ```sh
-docker run --rm ghcr.io/silaswei/proxy-stack:0.1.2 installer | bash -s -- \
-  --directory /opt/proxy-stack --mode standalone --non-interactive --prepare-only
-# 可选自定义：添加 --domain proxy.example.com --name 'My VPS'
-# 显式 IPv6 使用原始地址（不加 []），如 --domain 2606:4700:4700::1111
-# 复用已有反代时用 --mode existing-caddy；默认 auto 遇到端口冲突需要交互选择。
+/opt/proxy-stack/proxyctl node code
 ```
 
-个人 VPS 的 Docker Compose 代理：Xray VLESS + WebSocket + TLS，Caddy 自动证书，以及 Mihomo/Clash Meta、Quantumult X 订阅。国内、局域网和 Apple/iCloud 直连，其余默认代理。每位朋友有独立 UUID 和订阅 token，可单独撤销。
+加入码有效 **10 分钟**，只可使用一次；在第二台机器运行同一安装命令，选择“加入已有中心”并粘贴加入码。更多机器重复此过程。中心可以没有自己的代理节点。
 
-这是小范围的 v0.1.2 实现。**QX 原生 iOS 导入仍未验证**；输出依照官方 sample 的原生 VLESS/WSS 和配置区段语法，结构测试与 HTTP 200 均不等于真实客户端验收。历史上“第 4 行语法错误”的根因没有证实，不能把此前模板调整称为修复成功。参见 [客户端验收](docs/CLIENTS.md)。
+独立模式使用公网 80/443。80/443 冲突时，可选择已有反代模式，只发布 `127.0.0.1:18090 → 8080`；需自行审查 `data/runtime/host-caddy.snippet` 并配置公共 HTTPS。工具不会修改已有主机反代、DNS、防火墙或其他服务。
 
-## 环境与边界
+域名必须正确配置 A/AAAA 和 CAA。公网 IP 使用 Caddy 2.11.4、Let’s Encrypt `shortlived` ACME profile 和 `default_sni`；约 160 小时的证书需要持续满足续期条件。**容器启动不等于公网可达或证书已签发**。本地测试不验证公共 ACME 签发与续期。
 
-- Linux VPS；目标平台 Debian 12/13、Ubuntu 22.04/24.04。发行版与双架构 VPS 尚需实机验收，不能把本地 Docker 测试当成这些平台已通过。
-- Docker Engine 和 **Compose ≥ 2.24.4**（已有 Caddy override 使用 `!override`）。不支持旧版 `docker-compose`。
-- 可从公网访问的全局单播 IPv4/IPv6，或自己控制且 A/AAAA 正确的 ASCII/punycode 域名；公网 TCP 80/443 可达，域名 CAA 允许 ACME CA。独立模式默认占用 80/443；端口被占用时 Docker 会失败，工具不会停止现有服务。
-- 不修改宿主机默认路由、系统代理、DNS、现有反代或 systemd 服务。代理流量从 VPS 普通网络出口发出。只支持 TCP；生成的客户端配置关闭 UDP 转发和 IPv6 DNS。
-- WS 本身不是加密层，客户端到 Caddy 的 TLS 提供传输加密；Caddy 到 Xray 的 WS 只走项目 bridge 网络。Xray 不发布宿主机端口。
-- 无面板、计费、Reality、DNS API、自动升级或凭据轮换命令。这些是未来功能，不提供空实现。
-- 固定版本 Xray 会阻止私有地址的代理出站；局域网由客户端规则直连，不通过 VPS 访问服务器内部网络。此版本还会提示 WS 传输已弃用；v0.1.2 按兼容目标保留 WSS，未来迁移需单独验收。
-
-## 高级用法：源码 Compose 安装与初始化
-
-源码仓库 [silaswei/proxy-stack](https://github.com/silaswei/proxy-stack) 为私有仓库，克隆前需配置具有该仓库读取权限的 GitHub 身份。下面使用 HTTPS，需通过 Git 凭据管理器等方式认证；也可使用已授权的 SSH key 克隆。源码访问认证与 GHCR 镜像拉取认证是两回事。
-
-默认使用预构建工具镜像 `ghcr.io/silaswei/proxy-stack:0.1.2`，包已公开，服务器无需 GitHub 登录即可拉取。高级源码安装仍需私有仓库的读取权限。需要本地构建时使用下方方案。
+无终端也可初始化；省略地址和名称时使用相同默认值：
 
 ```sh
-git clone https://github.com/silaswei/proxy-stack.git
-cd proxy-stack
-cp .env.example .env
-# 源码模式需显式设置 DOMAIN 为域名或公网 IP；NODE_NAME 可留空。
-# 可选：export HOST_NODE_NAME="$(hostname)"（由宿主机传入；未传时名称回退到地址）。
-# 不要往 .env 写 UUID、token 或密钥。
-docker compose --profile tools pull
-./proxyctl init
-docker compose up -d
-./proxyctl status
-./proxyctl links
-./proxyctl verify
+# 中心，同时提供本机节点。--role hub-only 表示仅订阅中心。
+docker run --pull=always --rm ghcr.io/silaswei/proxy-stack:V1 installer | bash -s -- \
+  --non-interactive --role hub --mode standalone --directory /opt/proxy-stack
+
+# 加入节点：先把限时加入码保存到一个仅自己可读的文件。
+# 秘密通过 stdin 传入容器，不放在命令参数或 .env。
+docker run --pull=always --rm ghcr.io/silaswei/proxy-stack:V1 installer | bash -s -- \
+  --non-interactive --role node --join-code-file /secure/join-code \
+  --mode standalone --directory /opt/proxy-stack
 ```
 
-也可直接运行 `docker compose run --rm --no-deps manager init`。manager 只在显式调用时运行，默认 `docker compose up -d` 启动 Xray、Caddy、updater。manager/updater 使用同一个工具镜像。
+可选 `--domain proxy.example.com --name 'My VPS'`；IPv6 使用原始地址，不加方括号。`--prepare-only` 初始化但不启动服务。端口检查仍会短暂预留预期绑定端口。新安装会拉取 V1；重复运行受管安装保留实际 `.env`、UUID、token、WS 路径和模板，不自动升级或重置。
 
-需要本地构建时，先完成上述克隆及 `.env` 配置，将 `.env` 中的工具镜像改为：
+加入失败后保留已初始化目录：在中心重新生成加入码，在节点执行 `./proxyctl node join`，然后 `./proxyctl up`。不需要删除数据。已加入的节点须先 `detach`，才能再次加入；中心可通过 `node remove ID` 清理不再使用的登记。
 
-```dotenv
-TOOL_IMAGE=proxy-stack-tool:0.1.2
-```
-
-然后用以下命令替代预构建工具镜像的拉取与启动步骤：
+## 管理
 
 ```sh
-docker compose build manager updater
-./proxyctl init
-docker compose up -d
-```
-
-固定版本镜像为 `python:3.13-slim-bookworm`、`ghcr.io/xtls/xray-core:26.7.11`、`caddy:2.11.4`，默认值均已锁定实际核对并拉取的多架构 index digest（见 Dockerfile、Compose 和 `.env.example`）。工作流可构建 linux/amd64、linux/arm64，不能替代两架构运行测试。
-
-首次 `init` 无需访问 GitHub：使用仓库中的 **minimal-bootstrap 小型人工精选规则**。其中中国 IP 只有一个示例网段，不是完整国内分流库。updater 启动后立即拉取完整规则，成功后按 `UPDATE_INTERVAL`（默认一天）刷新；失败每 5 分钟重试。`status` 中 `rules=upstream` 才表示完整的上游列表已发布。应在日常使用前检查此状态。
-
-重复初始化保留全部 UUID、token 和 WS 路径。DOMAIN、端口、节点名称、模式等初始化设置不允许静默变更；不一致时明确失败，恢复原 `.env` 后重试。已有状态不得为了改域名直接删除，否则全部链接和凭据都会变。
-
-`.env.example` 所有值均非秘密。自定义 `PUBLIC_PORT` 时，客户端链接和 Caddy 站点使用同一端口；ACME 的 HTTP-01 仍要求公网 80 能到达 Caddy。`HTTP_PORT` 主要供本地测试，改成其他公网端口不会改变 CA 的验证规则。
-
-## 已有主机 Caddy
-
-在初始化前设置：
-
-```dotenv
-MODE=existing-caddy
-COMPOSE_FILE=compose.yaml:compose.external.yaml
-```
-
-然后执行上述拉取（或本地构建）、初始化及启动步骤。`COMPOSE_FILE` 由 Compose 读取，必须与 MODE 一起设置；单独设置 MODE 不会改变 Compose 端口。也可以在每个命令显式使用 `docker compose -f compose.yaml -f compose.external.yaml …`。
-
-此布局把项目 Caddy 作为内部网关，**仅发布 `127.0.0.1:18090 → 8080`**，覆盖默认端口列表，完全不发布 80/443。Xray 仍仅在容器网络内。主机 Caddy 负责公共 TLS，只需将整个站点反代到 `127.0.0.1:18090`。生成的待审查片段在 `data/runtime/host-caddy.snippet`：
-
-```caddyfile
-proxy.example.com:443 {
-    reverse_proxy 127.0.0.1:18090
-}
-```
-
-IP 模式生成的片段还包含显式 Let’s Encrypt `shortlived` 签发器和 `default_sni <IP>`，需要主机 Caddy ≥ 2.11；合并到唯一的全局选项块，并检查是否影响已有无 SNI 站点。内部网关仍只提供回环 HTTP。签发前不要把 IP HTTPS 链接当作就绪；无需为 IP 配置 DNS。关于公网 IP 证书参见 [Let’s Encrypt 公告](https://letsencrypt.org/2026/01/15/6day-and-ip-general-availability/)。
-
-工具不接触主机配置、不 reload。管理员应先审查、备份并执行主机 `caddy validate`，再按自己的运维流程 reload。复用已有同名站点时合并其现有路由，不能重复声明站点或覆盖其他业务。共享反代若启用 access/error 日志，应自行脱敏 `/sub/…`，避免把订阅凭据写进日志。
-
-## 日常命令
-
-```sh
-./proxyctl links                    # owner 的 4 个私密资源链接
-./proxyctl menu                     # 中文交互菜单；TTY 下无参数也可打开
-./proxyctl user add alice           # 创建朋友并在运行时重启 Xray
+./proxyctl menu                     # 中文菜单；终端中无参数也可打开
+./proxyctl links --labelled         # 中心 owner 的四个私密资源 URL
+./proxyctl user add alice           # 独立 UUID/token，下发所有节点
 ./proxyctl links --user alice
-./proxyctl user revoke alice        # 删除订阅与 UUID，并重启 Xray
-./proxyctl update-rules             # 只更新规则和订阅，不改写/重启 Xray
-./proxyctl status                   # 脱敏的发布状态、用户名称、刷新警告
-./proxyctl verify                   # 真实 HTTPS GET/HEAD、MIME、哈希和拒绝路径检查
-./proxyctl verify --base-url http://caddy:8080  # 已有 Caddy 模式，仅内部 HTTP 检查
+./proxyctl user revoke alice        # 立即移除订阅，等待各节点应用回执
+./proxyctl node list                # ID、desired、acknowledged、active、同步状态
+./proxyctl node code                # 显式显示一次性加入码
+./proxyctl node remove NODE_ID      # 立即使节点控制凭据失效；本机 ID 为 local
+./proxyctl node join                # 节点读入加入码；隐藏终端输入，也接受 stdin
+./proxyctl detach                   # 节点停止参与中心；中心不可达时本地仍会解除
+./proxyctl status
+./proxyctl verify                   # 中心真实 HTTPS 资源哈希、MIME、GET/HEAD 检查
+./proxyctl update-rules
+./proxyctl upgrade                  # 拉取 V1，重建原本运行的服务；保留配置和模板
 ./proxyctl up
-./proxyctl down                     # 保留数据、证书；不接受 -v 等删除参数
+./proxyctl down                     # 保留数据与证书，不接受删除参数
 ```
 
-owner 永久保留。用户名仅允许 `[a-z][a-z0-9_-]{0,31}`。用户变更将整组订阅、私有状态和 Xray 配置重新生成；manager 不挂载 docker.sock，只有 shell 包装器显式重启正在运行的 Xray。直接执行 manager 的 `user` 命令后，管理员必须执行 `docker compose restart xray`。重启前，旧内核仍可能接受已撤销 UUID 的新连接，既有隧道也可能继续；重启会中断所有用户的现有隧道。若重启失败，应立即重试并确认状态，不能把生成配置成功当作内核已应用。
+节点不生成自己的订阅链接；所有订阅与规则链接均指向中心，节点连接地址使用各节点自己的 IP/域名和 WS 路径。owner 永久保留；朋友标识匹配 `[a-z][a-z0-9_-]{0,31}`。添加/撤销不会更改其他用户的 UUID/token/URL。用户变更由各节点自动应用，重启该节点的 Xray 会中断其已有连接。
 
-订阅地址是持有即可使用的秘密。`init`、刷新日志、status 不显示 UUID/token；安装器、主动执行 `links` 和菜单的订阅选项会向操作者展示链接，请勿记录进普通日志、提交、截图公开或交给第三方二维码站。通过 HTTPS 提供的节点订阅必然包含对应用户 UUID。
+`node list` 的 `synced` 表示该节点已校验配置、成功启动 Xray 并回执当前 generation；`pending` 表示当前授权尚未确认；`offline` 表示超出租约心跳窗口；`removed` 表示已禁用。`acknowledged` 是最后确认版本，`active` 仅在当前版本就绪且租约有效时显示，否则为 0。不能把撤销后的 pending/offline 称作已应用。
 
-## 发布、规则与数据
+节点默认每 2 秒轮询，中心租约默认 **300 秒**（`LEASE_SECONDS`，10–3600）。节点在失联时可暂用最后好配置，租约到期由独立单调时钟看门狗终止 Xray，即使控制请求阻塞也执行。重启节点进程必须重新获取有效配置，不恢复磁盘上的旧租约。移除节点立即拒绝后续控制请求，已离线节点最迟在剩余租约结束停止。关闭/移除中心也受同一限制；需自行删除不再使用的主机 HTTPS 路由。
+
+订阅只发布确认当前授权的节点；新增用户、撤销用户、节点启动/恢复期间可能暂时没有节点，默认代理流量此时 `REJECT`/`reject`。显式国内/LAN/Apple/iCloud 规则继续直连。客户端已经缓存的旧订阅不会被远程强制刷新，但节点实际授权仍由独立 UUID 和租约限制。
+
+## 架构和数据
+
+- `manager` 是一次性 CLI；`hub` 提供内部控制 API；`xray` 使用工具镜像内的固定官方 Xray 二进制并监督子进程；`updater` 只处理规则。加入节点上的 hub/updater 进程休眠。
+- Caddy 只开放四个精确 POST 控制路径 `/control/v1/{enroll,poll,ack,detach}` 和精确订阅资源路径，控制监听器无宿主机端口。仅订阅中心不开放 Xray tunnel。
+- 控制客户端始终校验 HTTPS，禁用重定向和环境代理。加入码有 192 位随机秘密，服务端只存摘要；加入后每个节点使用独立秘密。普通 status/日志不输出 UUID、token 或加入码；只有显式 links/code 与安装收尾主动显示。
+- 节点只取得所需 UUID、自己的 WS 路径、generation 和租约，不取得用户订阅 token、其他节点控制秘密或中心完整状态。
+- 所有模型、发布和规则操作共享 `flock`；原子选择公共 revision。心跳单独保存，只在节点可见性发生变化时重新渲染，不在每次轮询重建大型规则。旧 revision 及时删除，撤销 token 不在旧公共树中残留。
+- updater 只读模型，读写 cache/public/locks，完全不挂载 runtime。没有 docker.sock、privileged 或 host networking。Caddy 单独保留低端口绑定 capability，其余容器 `cap_drop: ALL`。
 
 ```text
-data/model/state.json          私有用户模型，0700 目录 / 0600 文件
-data/runtime/xray/config.json  只向 Xray 挂载的配置
-data/runtime/caddy/            只向 Caddy 挂载的入口配置
-data/runtime/host-caddy.snippet 待管理员审查片段
-data/cache/                    最后一次规则集和刷新状态
-data/locks/operation.lock      manager / updater 共享进程锁
-data/public/releases/<id>/    成套发布文件及不可公开的哈希 manifest
-data/public/current           原子切换的相对 symlink
+data/model/state.json            中心用户/节点模型，或节点自身非秘密设置
+data/model/peer.json             加入节点自己的私密中心凭据
+data/model/heartbeats.json       中心节点最近轮询时间
+data/runtime/xray/active.json    监督运行器实际应用的配置
+data/runtime/node-status.json    运行器状态；没有用户秘密
+data/runtime/caddy/              本机 Caddy 配置
+data/cache/                     最后一次完整规则与刷新状态
+data/locks/                     跨进程写入锁
+data/public/current             原子指向已校验的发布目录
 ```
 
-私有目录及公共资源的宿主机父目录均限制访问；Xray 镜像以 UID 65532 运行，因此其子目录 0755、配置 0644，宿主机上的 `runtime` 父目录仍为 0700。updater 只读挂载模型，读写规则缓存、公共资源与锁，根本不挂载 runtime。Caddy 只读挂载公共资源与自己的配置，不挂载模型或 Xray 配置。没有 privileged、host network、docker.sock。
+私有目录 0700、模型与控制凭据文件 0600。订阅和 Xray 配置同样包含秘密；备份应加密并限制访问。不要公开 URL、UUID、token，也不要上传到第三方二维码站。已有反代的 access/error 日志应自行避免记录订阅路径或请求体。
 
-发布先生成新 revision、校验全部文件和 SHA-256，再原子切换 `current`，清理旧 revision（因此不会无限占用磁盘，也不会残留已撤销 token 文件）。只有固定的 token 资源路径允许 GET/HEAD，其他路径和目录列表返回 404；manifest 和私有文件不提供 HTTP 路由。不要手工往 public 写文件或 symlink。工具拒绝读取/发布时的 symlink 路径穿越；其可信前提仍是宿主机和写卷的进程没有被接管，文件服务器本身不是对抗恶意宿主机写入的隔离边界。
+规则源固定为 [Loyalsoldier/clash-rules](https://github.com/Loyalsoldier/clash-rules) 的 private/apple/icloud/proxy/direct/cncidr/lancidr。首次为 `minimal-bootstrap`，不代表完整国内分流；updater 成功后 `rules=upstream`。下载限时限量，拒绝危险 YAML 与异常缩水，失败保留最后好版本。两客户端共用规则语义：IP 查询域名代理 → 中心/各节点引导直连 → 私网/LAN → Apple/iCloud → 已知代理 → `.cn`/国内域名 → 国内 IP → 默认 VPS。节点和中心地址使用精确域名或 /32、/128 规则。
 
-所有写操作使用 `flock` 串行执行。普通渲染/写入/切换失败会保留原发布并还原私有配置；不会对 DNS、ACME、Docker 和多个文件承诺跨系统原子事务。突然断电或进程被杀可能留下未选择的候选 revision 或写到一半的用户变更；恢复原 `.env`、重新 `init`（按 state 重新协调配置）、验证后重启 Xray。规则更新器永远不写私有模型。普通更新不需要重启 Caddy。跨多个 HTTP 请求可能读取到先后两个 revision，日常更新不改变策略名或节点 tag。
+只提供 TCP VLESS/WSS/TLS，不启用 UDP 或 IPv6 DNS。固定 Xray 默认阻止私有地址代理出站。没有面板、Reality、计费或自动公网运维。本次是全新 V1，不提供旧版本状态/模板迁移。
 
-规则源固定为 [Loyalsoldier/clash-rules](https://github.com/Loyalsoldier/clash-rules) 的 `releases/latest/download/` 下 `private/apple/icloud/proxy/direct/cncidr/lancidr.txt`，不接受请求参数或环境变量提供任意源 URL。每份下载最多 16 MiB、30 秒网络超时，安全 YAML 解析禁止标签/别名；规则数量范围 1–500000。完整缓存后任何一个列表缩减超过 40% 都拒绝整批更新；首次小型 bootstrap 不参与相对缩减判断。失败留下最后一次好版本和独立刷新警告，healthcheck 以发布内容有效性为准，不会因上游故障把有效订阅判死。调度可响应 SIGTERM；正在进行的单次网络读取有超时，下一份下载前检查停止信号。
+## 源码与验证
 
-Mihomo 使用本服务器上的分组 classical rule-provider；QX 使用相同顺序的合并规则列表。所有列表都在每个用户的 token 路径下镜像，客户端无需直连 GitHub。顺序：四个 IP 查询域名代理 → 节点/订阅地址直连（IP 为精确 /32 或 /128，Mihomo 使用 no-resolve） → 私网/LAN → Apple/iCloud 直连 → 已知代理域名 → `.cn`/国内域名 → 国内 IP → 默认 VPS。精确域名、后缀、通配符、IPv4、IPv6 均经过统一中间模型转换；不支持的条目使整批失败。DNS 分别按客户端语法生成，未声称两端 DNS 行为完全等价。
-
-项目代码使用 MIT；下载的上游规则及其衍生数据按上游 GPL-3.0 许可处理，不能把项目 MIT 当作规则数据的许可证。来源、归属和随仓库提供的许可证见 [THIRD_PARTY.md](docs/THIRD_PARTY.md)。仓库不附带完整上游规则转储。
-
-## 测试与验收
+高级源码使用：复制 `.env.example` 为 `.env`，设置 DOMAIN、ROLE、LOCAL_NODE，运行 `./proxyctl init` 与 `./proxyctl up`。源码安装需要仓库读取权限；部署只使用 GHCR 镜像则无需 git。新 V1 的重复 init 保留身份，部署设置不允许静默更改。
 
 ```sh
-docker build -t proxy-stack-tool:0.1.2 -f manager/Dockerfile .
-docker run --rm --entrypoint python -v "$PWD/tests:/tests:ro" \
-  proxy-stack-tool:0.1.2 -m unittest discover -s /tests -v
+docker build -t proxy-stack-tool:V1 -f manager/Dockerfile .
+docker run --rm --network none --entrypoint python -v "$PWD/tests:/tests:ro" \
+  proxy-stack-tool:V1 -m unittest discover -s /tests -v
 DOMAIN=proxy.example.com docker compose config --quiet
 DOMAIN=proxy.example.com docker compose -f compose.yaml -f compose.external.yaml config --quiet
-# Linux（rootful Docker）：
+# Linux rootful Docker；macOS Docker Desktop 去掉 sudo。
 sudo python3 tests/integration/run.py
-# macOS Docker Desktop 则使用：python3 tests/integration/run.py
 ```
 
-离线单元测试不访问 GitHub、不需要真实秘密。集成测试使用实际 Docker 镜像、临时目录和独立 bridge 网络，自动清理，只绑定回环随机高端口；验证 Mihomo/Xray/Caddy 原生配置、IP ACME profile 无内部签发器、订阅路由、可信测试 CA 的 TLS（含 IPv4/IPv6 SAN、无 SNI 和错误 IP 拒绝）、真实 WS/VLESS TCP 出站，以及撤销后链接和 UUID 失效。初次可能需从公共 registry 拉取固定镜像，不使用生产域名或公网 ACME。Xray 默认阻止私有出站地址；集成测试只在另一份临时配置中精确放行模拟目标 IP 的 TCP 8000 端口，生成的生产配置不变。集成脚本需要宿主机 Python ≥ 3.9 和 Docker，不依赖宿主机 PyYAML。
+集成测试仅使用独立临时容器/网络、回环随机高端口与显式测试 CA。覆盖实际 Mihomo 经两台受监督 Xray 的 HTTPS/WSS/VLESS 出站、各节点独立用户同步与撤销、失联/阻塞期间租约停止、失败启动不回执、移除、稳定中心 URL；保留单节点和 IPv4/IPv6 SAN、无 SNI、错误证书拒绝、规则隔离测试。测试仅在独立临时配置中放行模拟 origin 的 IP:8000，不改变生产配置。Linux 需 sudo，以保持 root 所有的私有挂载和 `cap_drop ALL`；不能用放宽私有目录权限替代。
 
-Linux 集成测试要求通过 `sudo` 使用 rootful Docker：临时 bind mount 目录需由 root 创建，才能保持 manager 的 `cap_drop: ALL` 并执行目录权限操作；宿主机 Python 还需读取容器生成的 root 所有、0700 的模型目录。仅把 data 改成 0777 不能解决这两处权限问题。CI 与 release 的集成步骤均以 sudo 运行，以对应生产 Compose 自动创建的 root 所有挂载；不增加生产容器 capability、不放宽私有目录权限。macOS Docker Desktop 的文件共享行为不同，使用普通用户运行即可。
+发布工作流在 main push 或 main 手动触发，测试后构建 amd64/arm64 immutable `sha-<revision>` 镜像；发布串行执行，确认仍为当前 main 才更新唯一用户入口 `ghcr.io/silaswei/proxy-stack:V1`。历史标签保留。
 
-`verify` 检查真实 HTTP 响应、系统信任链、全部 owner 资源的哈希/MIME/GET/HEAD、未知 token 和目录拒绝。内部 `--base-url http://…` 明确不验证 TLS；verify 不验证 VLESS 出站或你的客户端所在网络。实际客户端还需按 [CLIENTS.md](docs/CLIENTS.md) 完成导入、规则刷新与出口检查。QX 无公开完整解析器，不能用这些测试替代 iOS。
-
-CI 在 push/PR 测试；release 工作流仅在 `v0.1.2` tag 或手动运行时以 `GITHUB_TOKEN` 推送 GHCR 多架构镜像，标签为 `0.1.2` 与 `sha-<完整提交>`，带 source/version/revision 标签。发布由仓库所有者执行；工作流推送镜像不保证包已经公开，GHCR 可见性需由所有者在 GitHub 包设置页面单独确认或设置。实际可拉取性以发布结果及包权限为准。
-
-## 备份与回退
-
-对 `data/model`、`data/runtime`、`data/cache` 做访问受限的加密备份，必要时也备份 Caddy 命名卷证书。公共订阅同样包含秘密，不能上传公开存储。记录使用的镜像 tag/digest；回退代码/镜像前先停 updater、核对 schema=1，恢复同一时点的模型/配置/缓存，使用原 `.env` 重新初始化并验证，再显式启动服务。v0.1.2 不提供自动跨版本迁移或旧 revision 选择命令。
-
-`down` 不删除数据或证书卷。已有 Caddy 的反代片段由管理员按原有配置所有权手动移除；工具不改共享入口或其他项目。完整删除属于人工运维操作，应先备份并确认路径和卷名。
+**QX 原生 iOS 导入、公共 ACME 签发/续期和真实 VPS/运营商网络尚未在本地环境验证。** 见 [客户端验收](docs/CLIENTS.md) 与 [验证记录](docs/VALIDATION.md)。代码 MIT；下载规则遵循上游 GPL-3.0，见 [第三方归属](docs/THIRD_PARTY.md)。

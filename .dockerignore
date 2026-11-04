@@ -12,3 +12,7 @@
 !manager/src/proxy_stack/templates/compose.external.yaml
 !manager/src/proxy_stack/templates/.env.example
 !manager/src/proxy_stack/templates/proxyctl
+!LICENSE
+!manager/licenses/
+!manager/licenses/NOTICE.txt
+!manager/licenses/Xray-MPL-2.0.txt

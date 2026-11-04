@@ -25,12 +25,14 @@ def verify(store, base_url=None):
     """Compare real GET/HEAD responses with the private manifest; TLS verifies by default."""
     with store.locked(updater=True):
         state = store.state()
+        if store.settings(state).role != "hub":
+            raise ValueError("verify subscriptions on the hub")
         manifest = store.validate_revision(store.current())
         settings = store.settings(state)
         origin = (base_url or settings.origin).rstrip("/")
         if not origin.startswith(("https://", "http://")):
             raise ValueError("verify base must be HTTP(S)")
-        opener = urllib.request.build_opener(NoRedirect, urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect, urllib.request.HTTPSHandler(context=ssl.create_default_context()))
         token = state["users"]["owner"]["token"]
         prefix = "sub/" + token + "/"
         checked = 0
@@ -108,6 +110,13 @@ def main(argv=None):
     verify_parser.add_argument("--base-url", help="optional operator-supplied HTTP gateway URL (TLS then untested)")
     sub.add_parser("update-rules")
     sub.add_parser("serve")
+    sub.add_parser("hub-api")
+    sub.add_parser("runtime")
+    sub.add_parser("join", help="read one-use join code from stdin, never argv")
+    sub.add_parser("detach", help="stop this node and revoke its hub enrollment")
+    node = sub.add_parser("node")
+    node.add_argument("action", choices=("code", "list", "remove", "join"))
+    node.add_argument("id", nargs="?")
     user = sub.add_parser("user")
     user.add_argument("action", choices=("add", "revoke"))
     user.add_argument("name", type=username)
@@ -130,20 +139,87 @@ def main(argv=None):
             print("Initialized; credentials preserved. Run links explicitly to display private URLs.")
         elif args.command == "user":
             store.mutate_user(args.action, args.name)
-            print("User configuration published. Restart Xray to apply credential changes.")
+            print("User configuration published; runtimes will apply and acknowledge. Check node list for pending/synced/offline.")
         elif args.command == "update-rules":
             store.update()
             print("Rules refreshed; credentials and Xray configuration unchanged.")
+        elif args.command in ("hub-api", "runtime"):
+            stop = threading.Event()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                signal.signal(sig, lambda *_: stop.set())
+            if args.command == "hub-api":
+                from .control import serve as hub_serve
+                hub_serve(store, stop)
+            else:
+                from .runtime import Runtime
+                Runtime(store).run(stop)
+        elif args.command == "node":
+            from .control import Hub
+            hub = Hub(store)
+            if args.action == "join":
+                if args.id:
+                    raise ValueError("join reads its code from stdin")
+                from .control import join
+                join(store, sys.stdin.readline(1026).strip())
+                print("Enrolled; start services and check sync status on the hub.")
+            elif args.action == "code":
+                if args.id:
+                    raise ValueError("code takes no node ID")
+                print(hub.code())
+            elif args.action == "remove":
+                hub.remove(args.id)
+                print("Node removed; polling credentials invalidated. Offline authorization expires within its lease.")
+            else:
+                if args.id:
+                    raise ValueError("list takes no node ID")
+                state = store.state()
+                if store.settings(state).role == "node":
+                    peer = store.model / "peer.json"
+                    print(json.dumps({"role": "node", "hub": store.read(peer)["origin"] if peer.exists() else None,
+                                      "hint": "manage friends/subscriptions on hub; node join retries enrollment"}))
+                else:
+                    print(json.dumps(hub.status(), ensure_ascii=False))
+        elif args.command == "join":
+            from .control import join
+            code = sys.stdin.readline(1026).strip()
+            join(store, code)
+            print("Enrolled; start services and check sync status on the hub.")
+        elif args.command == "detach":
+            from .control import request
+            acknowledged = False
+            with store.locked():
+                if store.settings(store.state()).role != "node":
+                    raise ValueError("detach is only for joined or pending nodes")
+                paths = [store.model / "peer.json", store.model / "pending-peer.json"]
+                identity = next((p for p in paths if p.exists()), None)
+                if identity is None:
+                    raise ValueError("no enrolled or pending node identity")
+                peer = store.read(identity)
+                try:
+                    request(peer["origin"], "detach", {"generation": 0}, "Bearer " + peer["id"] + ":" + peer["token"])
+                    acknowledged = True
+                except Exception:
+                    pass  # Still stop locally; never claim a remote acknowledgement.
+                finally:
+                    for path in paths:
+                        path.unlink(missing_ok=True)
+            print("Local node detached; runtime stops at the next poll. Hub removal " +
+                  ("acknowledged." if acknowledged else "pending; offline authorization expires within its lease."))
         elif args.command == "serve":
-            serve(store, Settings.from_env().interval)
+            if store.settings(store.state()).role == "node":
+                threading.Event().wait()
+            else:
+                serve(store, Settings.from_env().interval)
         elif args.command == "verify":
             print(json.dumps(verify(store, args.base_url), ensure_ascii=False))
-        elif args.command == "health":
-            print(json.dumps(store.health()))
         else:
             with store.locked(updater=True):
                 if args.command == "links":
                     state = store.state()
+                    if store.settings(state).role == "node":
+                        peer_path = store.model / "peer.json"
+                        hub_origin = store.read(peer_path)["origin"] if peer_path.exists() else "not enrolled; run proxyctl node join"
+                        raise ValueError("subscription links belong to the hub: " + hub_origin)
                     if args.user not in state["users"]:
                         raise ValueError("unknown user")
                     url = store.settings(state).origin + "/sub/" + state["users"][args.user]["token"] + "/"
@@ -153,8 +229,19 @@ def main(argv=None):
                 else:
                     result = store.health()
                     if args.command == "status":
-                        result["users"] = sorted(store.state()["users"])
-                    print(json.dumps(result))
+                        state = store.state()
+                        result["users"] = sorted(state["users"])
+                        result["role"] = store.settings(state).role
+                        if store.settings(state).role == "node":
+                            peer = store.model / "peer.json"
+                            result["hub"] = store.read(peer)["origin"] if peer.exists() else None
+                    if (store.runtime / "node-status.json").exists():
+                        result["runtime"] = store.read(store.runtime / "node-status.json")
+            if args.command in ("health", "status"):
+                from .control import Hub
+                if store.settings(store.state()).role == "hub":
+                    result["nodes"] = Hub(store).status()
+                print(json.dumps(result))
         return 0
     except (Exception, KeyboardInterrupt) as error:
         # Avoid URLs, UUIDs and raw state appearing in routine container logs.

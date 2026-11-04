@@ -8,7 +8,7 @@ if [ -f .proxy-stack-managed ]; then
   unset COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_PATH_SEPARATOR
   unset COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE
   unset DOMAIN NODE_NAME HOST_NODE_NAME MODE PUBLIC_PORT HTTP_PORT CONTACT_EMAIL UPDATE_INTERVAL
-  unset TOOL_IMAGE XRAY_IMAGE CADDY_IMAGE
+  unset TOOL_IMAGE CADDY_IMAGE ROLE LOCAL_NODE LEASE_SECONDS
 fi
 cmd=${1:-help}
 if [ "$#" -eq 0 ] && [ -t 0 ]; then cmd=menu; fi
@@ -23,7 +23,7 @@ case "$cmd" in
     fi
     exec 3<>/dev/tty
     while :; do
-      printf '\n代理管理（添加/撤销朋友会重启 Xray，中断现有连接）\n1) 我的订阅\n2) 添加朋友并显示订阅\n3) 撤销朋友\n4) 服务和规则状态\n5) 刷新规则\n0) 退出\n选择: ' >&3
+      printf '\n代理管理（用户变更由各节点同步，应用会中断该节点连接）\n1) 我的订阅\n2) 添加朋友并显示订阅\n3) 撤销朋友\n4) 服务和规则状态\n5) 刷新规则\n6) 更新 V1 镜像\n7) 节点同步状态\n8) 生成限时加入码\n9) 移除节点\n10) 加入已有中心（失败后可重试）\n0) 退出\n选择: ' >&3
       IFS= read -r choice <&3 || break
       case "$choice" in
         1) "$0" links --labelled || : ;;
@@ -33,33 +33,89 @@ case "$cmd" in
           if [ "$choice" = 2 ]; then
             if "$0" user add "$friend"; then "$0" links --user "$friend" --labelled || :; fi
           else
-            printf '撤销将重启 Xray，中断所有现有连接。确认撤销 %s？[y/N]: ' "$friend" >&3
+            printf '撤销将下发所有节点，离线节点租约到期停止。确认撤销 %s？[y/N]: ' "$friend" >&3
             IFS= read -r answer <&3 || break
             case "$answer" in y|Y) "$0" user revoke "$friend" || : ;; esac
           fi
           ;;
         4) "$0" status || : ;;
         5) "$0" update-rules || : ;;
+        6)
+          printf '拉取 V1 并更新正在运行的服务；保留 .env、模板和凭据。确认？[y/N]: ' >&3
+          IFS= read -r answer <&3 || break
+          case "$answer" in y|Y) "$0" upgrade || : ;; esac
+          ;;
+        7) "$0" node list || : ;;
+        8) "$0" node code || : ;;
+        9)
+          printf '要移除的节点 ID（从节点状态复制；本机为 local）: ' >&3
+          IFS= read -r node_id <&3 || break
+          "$0" node remove "$node_id" || :
+          ;;
+        10) "$0" node join <&3 || : ;;
         0) break ;;
-        *) printf '请选择 0–5。\n' >&3 ;;
+        *) printf '请选择 0–10。\n' >&3 ;;
       esac
     done
     ;;
-  init|links|verify|update-rules)
+  upgrade)
+    [ "$#" -eq 0 ] || { echo "upgrade takes no options" >&2; exit 2; }
+    [ -f .proxy-stack-managed ] && [ ! -L .proxy-stack-managed ] &&
+      [ "$(cat .proxy-stack-managed)" = proxy-stack-installer-v1 ] || {
+      echo "upgrade 仅支持安装器创建的受管 V1 目录；源码/未受管安装需自行管理镜像。" >&2
+      exit 2
+    }
+    for file in .env compose.yaml compose.external.yaml proxyctl; do
+      [ -f "$file" ] && [ ! -L "$file" ] || { echo "unsafe managed file: $file" >&2; exit 2; }
+    done
+    tool_image=ghcr.io/silaswei/proxy-stack:V1
+    image=$(docker compose config --images manager)
+    [ "$image" = "$tool_image" ] || {
+      echo "upgrade 仅支持 ghcr.io/silaswei/proxy-stack:V1；自定义镜像请手动迁移。" >&2
+      exit 2
+    }
+    running=$(docker compose ps --services --status running)
+    docker pull "$tool_image"
+    if [ -n "$running" ]; then
+      # Compose service names are validated identifiers returned by Compose.
+      docker compose up -d --no-deps --no-build --pull never --force-recreate $running
+    fi
+    echo "V1 镜像已更新；.env、模板和身份保留。请检查 node list 和服务状态。"
+    ;;
+  node)
+    if [ "${1:-}" = join ]; then
+      shift
+      [ "$#" -eq 0 ] || { echo "node join reads its code from stdin" >&2; exit 2; }
+      "$0" join
+    else
+      docker compose run --rm -T --interactive=false --no-deps manager node "$@"
+    fi
+    ;;
+  init|links|verify|update-rules|detach)
     docker compose run --rm -T --interactive=false --no-deps manager "$cmd" "$@"
     ;;
   status)
     docker compose run --rm -T --interactive=false --no-deps manager status "$@"
+    docker compose run --rm -T --interactive=false --no-deps manager node list || :
     docker compose ps
     ;;
-  user)
-    # The manager has no Docker access; only this operator wrapper restarts Xray.
-    docker compose run --rm -T --interactive=false --no-deps manager user "$@"
-    if [ -n "$(docker compose ps -q --status running xray)" ]; then
-      docker compose restart xray
+  join)
+    # Join secret travels on stdin only, never in argv/environment/Compose logs.
+    if [ -t 0 ]; then
+      printf '粘贴限时加入码（输入隐藏）: ' >&2
+      trap 'stty echo' EXIT HUP INT TERM
+      stty -echo
+      IFS= read -r code
+      stty echo
+      trap - EXIT HUP INT TERM
+      printf '\n' >&2
+      printf '%s\n' "$code" | docker compose run --rm -T --no-deps manager join
     else
-      echo "Xray is stopped; the next up will load the new users."
+      docker compose run --rm -T --no-deps manager join
     fi
+    ;;
+  user)
+    docker compose run --rm -T --interactive=false --no-deps manager user "$@"
     ;;
   up)
     docker compose run --rm -T --interactive=false --no-deps manager health >/dev/null
@@ -70,7 +126,7 @@ case "$cmd" in
     docker compose down
     ;;
   *)
-    echo "Usage: ./proxyctl {menu|init|links [--user NAME] [--labelled]|status|verify|update-rules|user add/revoke NAME|up|down}"
+    echo "Usage: ./proxyctl {menu|init|links [--user NAME] [--labelled]|status|verify|update-rules|upgrade|user add/revoke NAME|node code/list/remove ID|join|detach|up|down}"
     exit 2
     ;;
 esac

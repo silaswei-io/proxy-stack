@@ -42,7 +42,7 @@ def bootstrap():
 def download(name):
     if name not in SOURCES:
         raise ValueError("unknown rules source")
-    request = urllib.request.Request(BASE + name + ".txt", headers={"User-Agent": "proxy-stack/0.1.2"})
+    request = urllib.request.Request(BASE + name + ".txt", headers={"User-Agent": "proxy-stack/V1"})
     with urllib.request.urlopen(request, timeout=30) as response:
         raw = response.read(MAX_BYTES + 1)
     return parse_payload(raw)

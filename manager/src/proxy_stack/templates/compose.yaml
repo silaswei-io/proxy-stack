@@ -1,6 +1,6 @@
 name: proxy-stack
 x-tool: &tool
-  image: ${TOOL_IMAGE:-ghcr.io/silaswei/proxy-stack:0.1.2}
+  image: ${TOOL_IMAGE:-ghcr.io/silaswei/proxy-stack:V1}
   build:
     context: .
     dockerfile: manager/Dockerfile
@@ -16,11 +16,14 @@ x-tool: &tool
     MODE: ${MODE:-standalone}
     CONTACT_EMAIL: ${CONTACT_EMAIL:-}
     UPDATE_INTERVAL: ${UPDATE_INTERVAL:-86400}
+    ROLE: ${ROLE:-hub}
+    LOCAL_NODE: ${LOCAL_NODE:-true}
+    LEASE_SECONDS: ${LEASE_SECONDS:-300}
 services:
   manager:
     <<: *tool
     profiles: [tools]
-    volumes:
+    volumes: &state
       - ./data/model:/data/model
       - ./data/runtime:/data/runtime
       - ./data/public:/data/public
@@ -41,15 +44,18 @@ services:
       interval: 60s
       timeout: 10s
       retries: 3
-  xray:
-    image: ${XRAY_IMAGE:-ghcr.io/xtls/xray-core:26.7.11@sha256:a1644183accdb0b5be967093fe34be756fd5de15fe2ee0206e842ae17350967f}
-    command: [run, -config, /etc/xray/config.json]
+  hub:
+    <<: *tool
+    command: [hub-api]
     restart: unless-stopped
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    volumes:
-      - ./data/runtime/xray:/etc/xray:ro
+    stop_grace_period: 20s
+    volumes: *state
+  xray:
+    <<: *tool
+    command: [runtime]
+    restart: unless-stopped
+    stop_grace_period: 20s
+    volumes: *state
   caddy:
     image: ${CADDY_IMAGE:-caddy:2.11.4@sha256:0c994536bddb66445885237f1a5dcc1916bccea922661c76b4e9fc24061f9b52}
     command: [caddy, run, --config, /etc/caddy/Caddyfile, --adapter, caddyfile]

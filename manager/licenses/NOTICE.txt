@@ -1,0 +1,14 @@
+proxy-stack V1: Copyright (c) 2026 silaswei. MIT license: LICENSE.
+
+This image redistributes the unmodified official Xray-core 26.7.11 binary,
+copied from ghcr.io/xtls/xray-core:26.7.11 at the pinned index digest in
+manager/Dockerfile. Xray-core is licensed under Mozilla Public License 2.0;
+the full license is provided in Xray-MPL-2.0.txt.
+Copyright: Xray-core contributors and the upstream copyright holders.
+Corresponding source and upstream component notices for this exact version:
+https://github.com/XTLS/Xray-core/tree/v26.7.11
+https://github.com/XTLS/Xray-core/archive/refs/tags/v26.7.11.tar.gz
+No Xray source modifications were made by proxy-stack.
+
+Python and its base-image components retain their original licenses/notices.
+PyYAML 6.0.3 is MIT licensed; its installed package includes its license.

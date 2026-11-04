@@ -8,6 +8,8 @@ from unittest.mock import patch
 from proxy_stack import render, rules
 from proxy_stack.discovery import ENDPOINTS, detect_public_ip
 from proxy_stack.model import Settings, default_node_name, groups
+from proxy_stack.topology import initialize
+from dataclasses import asdict
 
 
 class DefaultsTests(unittest.TestCase):
@@ -65,6 +67,9 @@ class DefaultsTests(unittest.TestCase):
             with self.subTest(address=address):
                 settings = Settings(address, 'Host', port=8443)
                 self.assertEqual(settings.origin, 'https://' + host + ':8443')
+                state["settings"] = asdict(settings)
+                initialize(state)
+                state["nodes"]["local"].update(ready=True, acked=1)
                 files = render.public_files(settings, state, rules.bootstrap())
                 node = json.loads(files[base + 'clash.yaml'])['proxies'][0]
                 self.assertEqual(node['server'], address)

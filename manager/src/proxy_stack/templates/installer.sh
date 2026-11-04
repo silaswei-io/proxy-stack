@@ -1,23 +1,25 @@
 #!/usr/bin/env bash
-# Generic proxy-stack 0.1.2 installer. Prompts deliberately bypass piped stdin.
+# Generic proxy-stack V1 installer. Prompts deliberately bypass piped stdin.
 set -euo pipefail
 umask 077
-tool_image=ghcr.io/silaswei/proxy-stack:0.1.2
+tool_image=ghcr.io/silaswei/proxy-stack:V1
 domain= node_name= directory= mode=auto
+role= local_node=true join_code_file= join_code=
 prepare_only=false
 non_interactive=false
 fail() { printf 'proxy-stack: %s\n' "$*" >&2; exit 1; }
 usage() {
   printf '%s\n' 'Usage: bash installer.sh [--domain DOMAIN --name NAME] [--directory PATH]' \
-    '  [--mode auto|standalone|existing-caddy] [--prepare-only] [--non-interactive]'
+    '  [--mode auto|standalone|existing-caddy] [--role hub|hub-only|node] [--join-code-file PATH] [--prepare-only] [--non-interactive]'
 }
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --domain|--name|--directory|--mode)
+    --domain|--name|--directory|--mode|--role|--join-code-file)
       [ "$#" -ge 2 ] && [ -n "$2" ] || fail "$1 requires a value"
       case "$1" in
         --domain) domain=$2 ;; --name) node_name=$2 ;;
         --directory) directory=$2 ;; --mode) mode=$2 ;;
+        --role) role=$2 ;; --join-code-file) join_code_file=$2 ;;
       esac
       shift 2 ;;
     --prepare-only) prepare_only=true; shift ;;
@@ -63,7 +65,8 @@ if [ -e "$directory/$marker" ] || [ -L "$directory/$marker" ]; then
   if ! $non_interactive && { exec 3<>/dev/tty; } 2>/dev/null; then
     exec "$directory/proxyctl" menu
   fi
-  exec "$directory/proxyctl" links --labelled
+  "$directory/proxyctl" links --labelled || "$directory/proxyctl" status
+  exit $?
 fi
 if [ -e "$directory" ]; then
   [ -d "$directory" ] || fail '安装目标不是目录。'
@@ -72,12 +75,38 @@ if [ -e "$directory" ]; then
   [ "${#entries[@]}" -eq 0 ] || fail '拒绝非空且未受管的目录；请选择新的空目录。'
   shopt -u nullglob dotglob
 fi
+# Refresh the mutable major tag once, before any helper or Compose manager runs.
+# Repeated managed installs returned above deliberately do not pull or upgrade.
+docker pull "$tool_image" || fail '无法拉取 V1 工具镜像；安装未写入，请稍后重试。'
 prompt() {
   $non_interactive && fail "缺少 $1；非交互模式必须显式提供输入。"
   if ! { exec 3<>/dev/tty; } 2>/dev/null; then fail "缺少 $1；无终端请使用 --non-interactive 和显式参数。"; fi
   printf '%s' "$2" >&3
   IFS= read -r reply <&3 || fail '输入已结束。'
 }
+if [ -z "$role" ]; then
+  if $non_interactive; then role=hub; else
+    prompt --role '此服务器：1) 创建订阅中心并提供节点 2) 仅订阅中心 3) 加入已有中心 [1]: '
+    case "${reply:-1}" in 1) role=hub ;; 2) role=hub-only ;; 3) role=node ;; *) fail '请选择 1、2 或 3。' ;; esac
+  fi
+fi
+case "$role" in hub) ;; hub-only) role=hub; local_node=false ;; node) ;; *) fail 'invalid --role' ;; esac
+if [ "$role" = node ]; then
+  if [ -n "$join_code_file" ]; then
+    [ -f "$join_code_file" ] && [ ! -L "$join_code_file" ] || fail 'unsafe join code file'
+    IFS= read -r join_code < "$join_code_file" || [ -n "$join_code" ] || fail 'empty join code'
+  else
+    $non_interactive && fail '加入节点需 --join-code-file；密钥不会放入命令参数或 .env。'
+    { exec 3<>/dev/tty; } 2>/dev/null || fail '加入码需要终端或 --join-code-file'
+    printf '粘贴限时加入码（输入隐藏）: ' >&3
+    trap 'stty echo <&3' EXIT HUP INT TERM
+    stty -echo <&3
+    IFS= read -r join_code <&3 || { stty echo <&3; fail '输入已结束。'; }
+    stty echo <&3
+    trap - EXIT HUP INT TERM
+    printf '\n' >&3
+  fi
+fi
 if [ -z "$domain" ]; then
   detected_ip=$(docker run --rm --read-only --cap-drop=ALL --network bridge "$tool_image" detect-public-ip) || detected_ip=
   if $non_interactive; then
@@ -146,10 +175,11 @@ directory=$PWD
 chmod 700 proxyctl
 {
   while IFS= read -r line; do
-    case "$line" in DOMAIN=*|NODE_NAME=*|MODE=*) ;; *) printf '%s\n' "$line" ;; esac
+    case "$line" in DOMAIN=*|NODE_NAME=*|MODE=*|ROLE=*|LOCAL_NODE=*) ;; *) printf '%s\n' "$line" ;; esac
   done < .env.example
   # Model validation excludes quotes, expansion characters and newlines.
   printf "DOMAIN='%s'\nNODE_NAME='%s'\nMODE='%s'\n" "$domain" "$node_name" "$mode"
+  printf "ROLE='%s'\nLOCAL_NODE=%s\n" "$role" "$local_node"
   # Distinct installations must never adopt another directory's Compose services.
   printf 'COMPOSE_PROJECT_NAME=proxy-stack-%s-%s-%s\n' "$$" "$RANDOM" "$RANDOM"
   if [ "$mode" = existing-caddy ]; then printf 'COMPOSE_FILE=compose.yaml:compose.external.yaml\n'; fi
@@ -157,7 +187,17 @@ chmod 700 proxyctl
 printf 'proxy-stack-installer-v1\n' > "$marker"
 ./proxyctl init
 # Capture intentional operator disclosure before updater obtains its refresh lock.
-links=$(./proxyctl links --labelled)
+links=
+if [ "$role" = node ]; then
+  if ! printf '%s\n' "$join_code" | ./proxyctl join; then
+    printf '加入未完成，当前安装和配置已保留。请在中心重新生成加入码，然后执行：\n' >&2
+    printf '  %q node join\n  %q up\n' "$directory/proxyctl" "$directory/proxyctl" >&2
+    exit 1
+  fi
+  unset join_code
+else
+  links=$(./proxyctl links --labelled)
+fi
 if $prepare_only; then
   printf '初始化完成；--prepare-only 未启动服务。\n'
   printf '启动服务：%q up\n' "$directory/proxyctl"
@@ -165,7 +205,12 @@ else
   ./proxyctl up
   printf '已提交 Docker 启动；这不代表公网可达或证书签发成功。\n'
 fi
-printf '\nowner 私密订阅（请勿公开）：\n%s\n' "$links"
+if [ "$role" = hub ]; then
+  printf '\nowner 私密订阅（请勿公开）：\n%s\n' "$links"
+  printf '其他服务器加入：在本机执行 proxyctl node code，再在其他服务器的向导选择加入已有中心。\n'
+else
+  printf '节点已加入；统一订阅链接请从中心获取。中心 node list 可查看实际同步状态。\n'
+fi
 if [ "$mode" = existing-caddy ]; then
   printf '待处理：审查 %s/data/runtime/host-caddy.snippet，将地址 HTTPS 路由指向 127.0.0.1:18090；公共链接在配置完成前不可用。\n' "$directory"
 fi

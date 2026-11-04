@@ -15,6 +15,7 @@ from pathlib import Path
 
 from . import render, rules
 from .model import Settings, TOKEN, username
+from .topology import initialize, validate, invalidate
 
 
 def atomic_file(path, content, mode=0o600):
@@ -58,9 +59,11 @@ class Store:
             path.chmod(0o755 if path in (self.public / "releases", self.runtime / "xray") else 0o700)
 
     @contextmanager
-    def locked(self, updater=False):
+    def locked(self, updater=False, operation="operation.lock"):
         self.layout(updater)
-        fd = os.open(self.locks / "operation.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        if operation not in ("operation.lock", "refresh.lock"):
+            raise ValueError("invalid lock")
+        fd = os.open(self.locks / operation, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             yield
@@ -78,7 +81,7 @@ class Store:
 
     def state(self):
         state = self.read(self.model / "state.json")
-        if state.get("schema") != 1 or not state.get("users") or "owner" not in state["users"]:
+        if state.get("schema") != 1 or (state.get("settings", {}).get("role") == "hub" and "owner" not in state.get("users", {})):
             raise ValueError("unsupported or invalid state schema")
         for name, user in state["users"].items():
             username(name)
@@ -89,7 +92,7 @@ class Store:
         self.settings(state)
         if not state["ws_path"].startswith("/ws/") or not TOKEN.fullmatch(state["ws_path"][4:]):
             raise ValueError("invalid WebSocket path")
-        return state
+        return validate(state)
 
     def settings(self, state):
         return Settings(**state["settings"])
@@ -196,11 +199,12 @@ class Store:
         with self.locked():
             if (self.model / "state.json").exists():
                 state = self.state()
-                if state["settings"] != asdict(settings):
-                    raise ValueError("deployment settings differ from initialized state; restore original .env (migration is not supported)")
+                if self.settings(state) != settings:
+                    raise ValueError("deployment settings differ from initialized state; restore original .env")
             else:
                 state = {"schema": 1, "settings": asdict(settings), "ws_path": "/ws/" + secrets.token_hex(24),
-                         "users": {"owner": self.credentials()}}
+                         "users": {"owner": self.credentials()} if settings.role == "hub" else {}}
+                initialize(state)
             cache = self.read(self.cache / "rules.json") if (self.cache / "rules.json").exists() else rules.bootstrap()
             self.commit(state, cache, private=True)
             return state
@@ -221,17 +225,28 @@ class Store:
                 del state["users"][name]
             else:
                 raise ValueError("invalid user action")
+            if self.settings(state).role != "hub":
+                raise ValueError("manage users on the subscription hub")
+            if len(state["users"]) > 128:
+                raise ValueError("user limit reached")
+            invalidate(state)
             self.commit(state, self.read(self.cache / "rules.json"), private=True)
 
     def update(self, fetch=rules.download):
-        with self.locked(updater=True):
+        # Serialize downloads independently. Slow upstreams must not hold the
+        # control-plane lock or block node leases and friend mutations.
+        with self.locked(updater=True, operation="refresh.lock"):
             try:
-                state = self.state()
-                cache = rules.refresh(self.read(self.cache / "rules.json"), fetch)
-                self.commit(state, cache, refresh={"ok": True, "at": int(time.time())})
+                with self.locked(updater=True):
+                    previous = self.read(self.cache / "rules.json")
+                cache = rules.refresh(previous, fetch)
+                with self.locked(updater=True):
+                    # Re-read the latest users/topology after the download.
+                    state = self.state()
+                    self.commit(state, cache, refresh={"ok": True, "at": int(time.time())})
             except Exception as error:
-                # Never persist raw exceptions: HTTP exceptions can contain bearer URLs.
-                atomic_file(self.cache / "refresh.json", render.encoded({"ok": False, "at": int(time.time()), "error_type": type(error).__name__}))
+                with self.locked(updater=True):
+                    atomic_file(self.cache / "refresh.json", render.encoded({"ok": False, "at": int(time.time()), "error_type": type(error).__name__}))
                 raise
 
     def health(self):
