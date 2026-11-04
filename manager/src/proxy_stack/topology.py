@@ -1,4 +1,4 @@
-"""V1 topology initialization and validation."""
+"""v1.0.0 topology initialization and validation."""
 import time
 from dataclasses import asdict
 
@@ -26,7 +26,7 @@ def initialize(state):
 
 def validate(state):
     if 'nodes' not in state:
-        raise ValueError('invalid V1 topology; initialize a fresh V1 installation')
+        raise ValueError('invalid v1.0.0 topology; initialize a fresh v1.0.0 installation')
     if type(state.get('generation')) is not int or state['generation'] < 1 or len(state['nodes']) > 128:
         raise ValueError('invalid topology')
     names = set()

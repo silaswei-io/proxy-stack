@@ -153,7 +153,7 @@ def public_files(settings, state, cache):
             files[base + "rules/" + name + ".yaml"] = content
         files[base + "qx/nodes.txt"] = "".join(qx_nodes)
         files[base + "qx/rules.list"] = qx_rules
-        files[base + "qx/full.conf"] = f"""# proxy-stack V1; QX native iOS import remains UNVERIFIED.
+        files[base + "qx/full.conf"] = f"""# proxy-stack v1.0.0; QX native iOS import remains UNVERIFIED.
 # Rules: {cache['quality']}; URLs below are private credentials.
 # No ready nodes means normally proxied traffic is REJECTED.
 # Ready nodes: {len(nodes)}. If zero, wait for node startup/ack and check proxyctl node list.

@@ -30,7 +30,7 @@ if args == ['info']:
 if args[:3] == ['compose', 'version', '--short']:
     print(os.environ.get('FAKE_COMPOSE_VERSION', '2.24.4')); sys.exit(0)
 if args[0] == 'pull':
-    assert args == ['pull', 'ghcr.io/silaswei/proxy-stack:V1']
+    assert args == ['pull', 'ghcr.io/silaswei/proxy-stack:v1.0.0']
     sys.exit(0)
 if args[0] == 'rm':
     sys.exit(0)
@@ -50,7 +50,7 @@ if args[0] == 'run':
 assert args[0] == 'compose', args
 assert os.environ.get('COMPOSE_FILE') != '/unrelated/compose.yaml', 'inherited Compose configuration'
 if args[1] == 'config' and '--images' in args:
-    print(os.environ.get('FAKE_TOOL_IMAGE', 'ghcr.io/silaswei/proxy-stack:V1'));sys.exit(0)
+    print(os.environ.get('FAKE_TOOL_IMAGE', 'ghcr.io/silaswei/proxy-stack:v1.0.0'));sys.exit(0)
 if args[1] == 'ps' and '--services' in args:
     print(os.environ.get('FAKE_RUNNING', 'hub\nxray\nupdater\ncaddy'));sys.exit(0)
 if args[1] == 'run':
@@ -236,7 +236,7 @@ class InstallerTests(unittest.TestCase):
 
     def test_v1_pull_and_explicit_image_update_preserve_actual_files(self):
         self.assert_ok(self.install('--prepare-only'))
-        self.assertEqual(self.calls().count(['pull', 'ghcr.io/silaswei/proxy-stack:V1']), 1)
+        self.assertEqual(self.calls().count(['pull', 'ghcr.io/silaswei/proxy-stack:v1.0.0']), 1)
         before = {str(p.relative_to(self.destination)): p.read_bytes() for p in self.destination.rglob('*') if p.is_file()}
         self.log.write_text('')
         self.assert_ok(self.install('--prepare-only'))
@@ -244,7 +244,7 @@ class InstallerTests(unittest.TestCase):
         result = subprocess.run([str(self.destination / 'proxyctl'), 'upgrade'], env=self.env,
                                 text=True, capture_output=True, timeout=10)
         self.assert_ok(result)
-        self.assertEqual(self.calls().count(['pull', 'ghcr.io/silaswei/proxy-stack:V1']), 1)
+        self.assertEqual(self.calls().count(['pull', 'ghcr.io/silaswei/proxy-stack:v1.0.0']), 1)
         self.assertIn(['compose','up','-d','--no-deps','--no-build','--pull','never','--force-recreate','hub','xray','updater','caddy'],self.calls())
         self.assertEqual(before, {str(p.relative_to(self.destination)):p.read_bytes() for p in self.destination.rglob('*') if p.is_file()})
 

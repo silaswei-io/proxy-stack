@@ -23,7 +23,7 @@ case "$cmd" in
     fi
     exec 3<>/dev/tty
     while :; do
-      printf '\n代理管理（用户变更由各节点同步，应用会中断该节点连接）\n1) 我的订阅\n2) 添加朋友并显示订阅\n3) 撤销朋友\n4) 服务和规则状态\n5) 刷新规则\n6) 更新 V1 镜像\n7) 节点同步状态\n8) 生成限时加入码\n9) 移除节点\n10) 加入已有中心（失败后可重试）\n0) 退出\n选择: ' >&3
+      printf '\n代理管理（用户变更由各节点同步，应用会中断该节点连接）\n1) 我的订阅\n2) 添加朋友并显示订阅\n3) 撤销朋友\n4) 服务和规则状态\n5) 刷新规则\n6) 更新 v1.0.0 镜像\n7) 节点同步状态\n8) 生成限时加入码\n9) 移除节点\n10) 加入已有中心（失败后可重试）\n0) 退出\n选择: ' >&3
       IFS= read -r choice <&3 || break
       case "$choice" in
         1) "$0" links --labelled || : ;;
@@ -41,7 +41,7 @@ case "$cmd" in
         4) "$0" status || : ;;
         5) "$0" update-rules || : ;;
         6)
-          printf '拉取 V1 并更新正在运行的服务；保留 .env、模板和凭据。确认？[y/N]: ' >&3
+          printf '拉取 v1.0.0 并更新正在运行的服务；保留 .env、模板和凭据。确认？[y/N]: ' >&3
           IFS= read -r answer <&3 || break
           case "$answer" in y|Y) "$0" upgrade || : ;; esac
           ;;
@@ -62,16 +62,16 @@ case "$cmd" in
     [ "$#" -eq 0 ] || { echo "upgrade takes no options" >&2; exit 2; }
     [ -f .proxy-stack-managed ] && [ ! -L .proxy-stack-managed ] &&
       [ "$(cat .proxy-stack-managed)" = proxy-stack-installer-v1 ] || {
-      echo "upgrade 仅支持安装器创建的受管 V1 目录；源码/未受管安装需自行管理镜像。" >&2
+      echo "upgrade 仅支持安装器创建的受管 v1.0.0 目录；源码/未受管安装需自行管理镜像。" >&2
       exit 2
     }
     for file in .env compose.yaml compose.external.yaml proxyctl; do
       [ -f "$file" ] && [ ! -L "$file" ] || { echo "unsafe managed file: $file" >&2; exit 2; }
     done
-    tool_image=ghcr.io/silaswei/proxy-stack:V1
+    tool_image=ghcr.io/silaswei/proxy-stack:v1.0.0
     image=$(docker compose config --images manager)
     [ "$image" = "$tool_image" ] || {
-      echo "upgrade 仅支持 ghcr.io/silaswei/proxy-stack:V1；自定义镜像请手动迁移。" >&2
+      echo "upgrade 仅支持 ghcr.io/silaswei/proxy-stack:v1.0.0；自定义镜像请手动迁移。" >&2
       exit 2
     }
     running=$(docker compose ps --services --status running)
@@ -80,7 +80,7 @@ case "$cmd" in
       # Compose service names are validated identifiers returned by Compose.
       docker compose up -d --no-deps --no-build --pull never --force-recreate $running
     fi
-    echo "V1 镜像已更新；.env、模板和身份保留。请检查 node list 和服务状态。"
+    echo "v1.0.0 镜像已更新；.env、模板和身份保留。请检查 node list 和服务状态。"
     ;;
   node)
     if [ "${1:-}" = join ]; then

@@ -1,4 +1,4 @@
-"""Real V1 control plane, supervised nodes, trusted HTTPS and Mihomo egress."""
+"""Real v1.0.0 control plane, supervised nodes, trusted HTTPS and Mihomo egress."""
 import http.client
 import json
 import shutil

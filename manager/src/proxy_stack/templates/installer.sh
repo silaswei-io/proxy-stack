@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Generic proxy-stack V1 installer. Prompts deliberately bypass piped stdin.
+# Generic proxy-stack v1.0.0 installer. Prompts deliberately bypass piped stdin.
 set -euo pipefail
 umask 077
-tool_image=ghcr.io/silaswei/proxy-stack:V1
+tool_image=ghcr.io/silaswei/proxy-stack:v1.0.0
 domain= node_name= directory= mode=auto
 role= local_node=true join_code_file= join_code=
 prepare_only=false
@@ -77,7 +77,7 @@ if [ -e "$directory" ]; then
 fi
 # Refresh the mutable major tag once, before any helper or Compose manager runs.
 # Repeated managed installs returned above deliberately do not pull or upgrade.
-docker pull "$tool_image" || fail '无法拉取 V1 工具镜像；安装未写入，请稍后重试。'
+docker pull "$tool_image" || fail '无法拉取 v1.0.0 工具镜像；安装未写入，请稍后重试。'
 prompt() {
   $non_interactive && fail "缺少 $1；非交互模式必须显式提供输入。"
   if ! { exec 3<>/dev/tty; } 2>/dev/null; then fail "缺少 $1；无终端请使用 --non-interactive 和显式参数。"; fi

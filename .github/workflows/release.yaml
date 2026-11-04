@@ -7,7 +7,7 @@ permissions:
   contents: read
   packages: write
 concurrency:
-  group: release-tool-V1
+  group: release-tool-v1.0.0
   cancel-in-progress: false
 jobs:
   publish:
@@ -17,8 +17,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build and test before publication
         run: |
-          docker build -t proxy-stack-tool:V1 -f manager/Dockerfile .
-          docker run --rm --entrypoint python -v "$PWD/tests:/tests:ro" proxy-stack-tool:V1 -m unittest discover -s /tests -v
+          docker build -t proxy-stack-tool:v1.0.0 -f manager/Dockerfile .
+          docker run --rm --entrypoint python -v "$PWD/tests:/tests:ro" proxy-stack-tool:v1.0.0 -m unittest discover -s /tests -v
           sudo python3 tests/integration/run.py
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -37,16 +37,16 @@ jobs:
             ghcr.io/silaswei/proxy-stack:sha-${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/silaswei/proxy-stack
-            org.opencontainers.image.version=V1
+            org.opencontainers.image.version=v1.0.0
             org.opencontainers.image.revision=${{ github.sha }}
-      - name: Advance V1 only for the current main revision
+      - name: Advance v1.0.0 only for the current main revision
         env:
           EXPECTED_SHA: ${{ github.sha }}
         run: |
           current=$(git ls-remote origin refs/heads/main | cut -f1)
           if [ "$current" != "$EXPECTED_SHA" ]; then
-            echo "A newer main revision exists; immutable revision retained, V1 unchanged."
+            echo "A newer main revision exists; immutable revision retained, v1.0.0 unchanged."
             exit 0
           fi
-          docker buildx imagetools create --tag ghcr.io/silaswei/proxy-stack:V1 \
+          docker buildx imagetools create --tag ghcr.io/silaswei/proxy-stack:v1.0.0 \
             "ghcr.io/silaswei/proxy-stack:sha-$EXPECTED_SHA"

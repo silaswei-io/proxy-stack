@@ -1,3 +1,3 @@
 """Personal VLESS/WSS stack manager."""
 
-__version__ = "V1"
+__version__ = "v1.0.0"

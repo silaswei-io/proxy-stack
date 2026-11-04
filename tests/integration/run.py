@@ -2,7 +2,7 @@
 """Disposable Docker integration; only loopback ephemeral high ports are published.
 
 No GitHub access or real deployment inputs are needed. Existing containers are not
-touched. The tool image must first be built as proxy-stack-tool:V1.
+touched. The tool image must first be built as proxy-stack-tool:v1.0.0.
 On Linux with rootful Docker, run with sudo: both the bind-mount ownership and
 host Python's access to generated root-owned 0700 directories require root.
 """
@@ -25,7 +25,7 @@ import uuid
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-TOOL = os.environ.get("TEST_TOOL_IMAGE", "proxy-stack-tool:V1")
+TOOL = os.environ.get("TEST_TOOL_IMAGE", "proxy-stack-tool:v1.0.0")
 XRAY = os.environ.get("TEST_XRAY_IMAGE", "ghcr.io/xtls/xray-core:26.7.11@sha256:a1644183accdb0b5be967093fe34be756fd5de15fe2ee0206e842ae17350967f")
 CADDY = os.environ.get("TEST_CADDY_IMAGE", "caddy:2.11.4@sha256:0c994536bddb66445885237f1a5dcc1916bccea922661c76b4e9fc24061f9b52")
 MIHOMO = os.environ.get("TEST_MIHOMO_IMAGE", "metacubex/mihomo:v1.19.15@sha256:da91cd45f1c96fe964982d7bcf3e7252d122022c65694365f3cd36c76e2d2ebd")
@@ -244,7 +244,7 @@ def main():
             if external:
                 ports = services["caddy"]["ports"]
                 assert len(ports) == 1 and ports[0]["host_ip"] == "127.0.0.1" and ports[0]["published"] == "18090" and ports[0]["target"] == 8080
-    print("PASS: both Compose layouts, all V1 roles and container isolation invariants")
+    print("PASS: both Compose layouts, all v1.0.0 roles and container isolation invariants")
     identifier = "proxy-stack-test-" + uuid.uuid4().hex[:12]
     containers = []
     with tempfile.TemporaryDirectory(prefix="proxy-stack-test-") as temporary:

@@ -36,6 +36,6 @@ and not a bundled client implementation.
 
 Container images retain their own component notices and licenses.
 
-The V1 tool image bundles the unmodified official Xray-core 26.7.11 binary.
+The v1.0.0 tool image bundles the unmodified official Xray-core 26.7.11 binary.
 Its MPL-2.0 license, exact source URLs and generic redistribution notice are
 installed alongside this project’s MIT license in `/usr/share/licenses/proxy-stack/`.

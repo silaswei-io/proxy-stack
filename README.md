@@ -1,4 +1,4 @@
-# proxy-stack V1
+# proxy-stack v1.0.0
 
 一个订阅中心管理多台机器。每位朋友各有稳定订阅 URL 和独立 UUID；同一个 Mihomo/Clash Meta 或 Quantumult X 订阅包含所有已就绪节点。国内、局域网、Apple/iCloud 直连，其余走 `VPS` 节点组。没有就绪节点时，默认代理流量被拒绝，避免意外直连。
 
@@ -7,7 +7,7 @@
 服务器只需 Docker Engine 和 Compose **≥ 2.24.4**，不需要宿主机 Python 或 git：
 
 ```sh
-docker run --pull=always --rm ghcr.io/silaswei/proxy-stack:V1 installer | bash
+docker run --pull=always --rm ghcr.io/silaswei/proxy-stack:v1.0.0 installer | bash
 ```
 
 向导提供三个选择：创建中心并同时运行节点、仅创建订阅中心、加入已有中心。地址默认探测到的公网 IP，可改为域名；节点名默认使用宿主机 hostname。IP 无需域名/DNS，但仍需可从公网访问。不能填写私网、回环或保留地址。
@@ -28,17 +28,17 @@ docker run --pull=always --rm ghcr.io/silaswei/proxy-stack:V1 installer | bash
 
 ```sh
 # 中心，同时提供本机节点。--role hub-only 表示仅订阅中心。
-docker run --pull=always --rm ghcr.io/silaswei/proxy-stack:V1 installer | bash -s -- \
+docker run --pull=always --rm ghcr.io/silaswei/proxy-stack:v1.0.0 installer | bash -s -- \
   --non-interactive --role hub --mode standalone --directory /opt/proxy-stack
 
 # 加入节点：先把限时加入码保存到一个仅自己可读的文件。
 # 秘密通过 stdin 传入容器，不放在命令参数或 .env。
-docker run --pull=always --rm ghcr.io/silaswei/proxy-stack:V1 installer | bash -s -- \
+docker run --pull=always --rm ghcr.io/silaswei/proxy-stack:v1.0.0 installer | bash -s -- \
   --non-interactive --role node --join-code-file /secure/join-code \
   --mode standalone --directory /opt/proxy-stack
 ```
 
-可选 `--domain proxy.example.com --name 'My VPS'`；IPv6 使用原始地址，不加方括号。`--prepare-only` 初始化但不启动服务。端口检查仍会短暂预留预期绑定端口。新安装会拉取 V1；重复运行受管安装保留实际 `.env`、UUID、token、WS 路径和模板，不自动升级或重置。
+可选 `--domain proxy.example.com --name 'My VPS'`；IPv6 使用原始地址，不加方括号。`--prepare-only` 初始化但不启动服务。端口检查仍会短暂预留预期绑定端口。新安装会拉取 v1.0.0；重复运行受管安装保留实际 `.env`、UUID、token、WS 路径和模板，不自动升级或重置。
 
 加入失败后保留已初始化目录：在中心重新生成加入码，在节点执行 `./proxyctl node join`，然后 `./proxyctl up`。不需要删除数据。已加入的节点须先 `detach`，才能再次加入；中心可通过 `node remove ID` 清理不再使用的登记。
 
@@ -58,7 +58,7 @@ docker run --pull=always --rm ghcr.io/silaswei/proxy-stack:V1 installer | bash -
 ./proxyctl status
 ./proxyctl verify                   # 中心真实 HTTPS 资源哈希、MIME、GET/HEAD 检查
 ./proxyctl update-rules
-./proxyctl upgrade                  # 拉取 V1，重建原本运行的服务；保留配置和模板
+./proxyctl upgrade                  # 拉取 v1.0.0，重建原本运行的服务；保留配置和模板
 ./proxyctl up
 ./proxyctl down                     # 保留数据与证书，不接受删除参数
 ```
@@ -96,16 +96,16 @@ data/public/current             原子指向已校验的发布目录
 
 规则源固定为 [Loyalsoldier/clash-rules](https://github.com/Loyalsoldier/clash-rules) 的 private/apple/icloud/proxy/direct/cncidr/lancidr。首次为 `minimal-bootstrap`，不代表完整国内分流；updater 成功后 `rules=upstream`。下载限时限量，拒绝危险 YAML 与异常缩水，失败保留最后好版本。两客户端共用规则语义：IP 查询域名代理 → 中心/各节点引导直连 → 私网/LAN → Apple/iCloud → 已知代理 → `.cn`/国内域名 → 国内 IP → 默认 VPS。节点和中心地址使用精确域名或 /32、/128 规则。
 
-只提供 TCP VLESS/WSS/TLS，不启用 UDP 或 IPv6 DNS。固定 Xray 默认阻止私有地址代理出站。没有面板、Reality、计费或自动公网运维。本次是全新 V1，不提供旧版本状态/模板迁移。
+只提供 TCP VLESS/WSS/TLS，不启用 UDP 或 IPv6 DNS。固定 Xray 默认阻止私有地址代理出站。没有面板、Reality、计费或自动公网运维。本次是全新 v1.0.0，不提供旧版本状态/模板迁移。
 
 ## 源码与验证
 
-高级源码使用：复制 `.env.example` 为 `.env`，设置 DOMAIN、ROLE、LOCAL_NODE，运行 `./proxyctl init` 与 `./proxyctl up`。源码安装需要仓库读取权限；部署只使用 GHCR 镜像则无需 git。新 V1 的重复 init 保留身份，部署设置不允许静默更改。
+高级源码使用：复制 `.env.example` 为 `.env`，设置 DOMAIN、ROLE、LOCAL_NODE，运行 `./proxyctl init` 与 `./proxyctl up`。源码安装需要仓库读取权限；部署只使用 GHCR 镜像则无需 git。新 v1.0.0 的重复 init 保留身份，部署设置不允许静默更改。
 
 ```sh
-docker build -t proxy-stack-tool:V1 -f manager/Dockerfile .
+docker build -t proxy-stack-tool:v1.0.0 -f manager/Dockerfile .
 docker run --rm --network none --entrypoint python -v "$PWD/tests:/tests:ro" \
-  proxy-stack-tool:V1 -m unittest discover -s /tests -v
+  proxy-stack-tool:v1.0.0 -m unittest discover -s /tests -v
 DOMAIN=proxy.example.com docker compose config --quiet
 DOMAIN=proxy.example.com docker compose -f compose.yaml -f compose.external.yaml config --quiet
 # Linux rootful Docker；macOS Docker Desktop 去掉 sudo。
@@ -114,6 +114,6 @@ sudo python3 tests/integration/run.py
 
 集成测试仅使用独立临时容器/网络、回环随机高端口与显式测试 CA。覆盖实际 Mihomo 经两台受监督 Xray 的 HTTPS/WSS/VLESS 出站、各节点独立用户同步与撤销、失联/阻塞期间租约停止、失败启动不回执、移除、稳定中心 URL；保留单节点和 IPv4/IPv6 SAN、无 SNI、错误证书拒绝、规则隔离测试。测试仅在独立临时配置中放行模拟 origin 的 IP:8000，不改变生产配置。Linux 需 sudo，以保持 root 所有的私有挂载和 `cap_drop ALL`；不能用放宽私有目录权限替代。
 
-发布工作流在 main push 或 main 手动触发，测试后构建 amd64/arm64 immutable `sha-<revision>` 镜像；发布串行执行，确认仍为当前 main 才更新唯一用户入口 `ghcr.io/silaswei/proxy-stack:V1`。历史标签保留。
+发布工作流在 main push 或 main 手动触发，测试后构建 amd64/arm64 immutable `sha-<revision>` 镜像；发布串行执行，确认仍为当前 main 才更新唯一用户入口 `ghcr.io/silaswei/proxy-stack:v1.0.0`。历史标签保留。
 
 **QX 原生 iOS 导入、公共 ACME 签发/续期和真实 VPS/运营商网络尚未在本地环境验证。** 见 [客户端验收](docs/CLIENTS.md) 与 [验证记录](docs/VALIDATION.md)。代码 MIT；下载规则遵循上游 GPL-3.0，见 [第三方归属](docs/THIRD_PARTY.md)。
