@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from proxy_stack import render, rules
-from proxy_stack.discovery import ENDPOINTS, detect_public_ip
+from proxy_stack.discovery import ENDPOINTS, detect_public_ip, check_address
 from proxy_stack.model import Settings, default_node_name, groups
 from proxy_stack.topology import initialize
 from dataclasses import asdict
@@ -35,6 +35,23 @@ class DefaultsTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, '--domain'):
                 detect_public_ip()
             self.assertEqual(build.return_value.open.call_count, 1)
+
+    def test_domain_preflight_accepts_proven_dual_stack_and_explains_unproven_addresses(self):
+        import socket
+        records = [(socket.AF_INET, 1, 6, '', ('8.8.8.8', 0)),
+                   (socket.AF_INET6, 1, 6, '', ('2606:4700:4700::1111', 0, 0, 0))]
+        with patch('socket.getaddrinfo', return_value=records), patch('proxy_stack.discovery.urllib.request.build_opener') as build:
+            build.return_value.open.side_effect = [io.BytesIO(b'8.8.8.8'), io.BytesIO(b'2606:4700:4700::1111')]
+            check_address('proxy.example.com')
+            self.assertEqual(build.return_value.open.call_count, 2)
+            build.return_value.open.side_effect = [io.BytesIO(b'8.8.8.8'), OSError('no IPv6 proof')]
+            with self.assertRaisesRegex(ValueError, '无法证明全部 A/AAAA'):
+                check_address('proxy.example.com')
+        with patch('socket.getaddrinfo', return_value=records[:1]), patch('proxy_stack.discovery.urllib.request.build_opener') as build:
+            build.return_value.open.side_effect = [io.BytesIO(b'8.8.8.8'), OSError('v4 only')]
+            check_address('proxy.example.com')
+        with patch('socket.getaddrinfo', side_effect=OSError('dns')), self.assertRaisesRegex(ValueError, '超时'):
+            check_address('proxy.example.com')
 
     def test_explicit_hosts_reject_ambiguous_private_and_injection(self):
         for value in ('8.8.8.08', '0177.0.0.1', '127.1', '2130706433', '0x08080808',

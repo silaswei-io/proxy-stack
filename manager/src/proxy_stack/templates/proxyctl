@@ -7,7 +7,7 @@ if [ -f .proxy-stack-managed ]; then
   # unrelated project's exported shell variables. Advanced source use is unchanged.
   unset COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_PATH_SEPARATOR
   unset COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE
-  unset DOMAIN NODE_NAME HOST_NODE_NAME MODE PUBLIC_PORT HTTP_PORT CONTACT_EMAIL UPDATE_INTERVAL
+  unset DOMAIN NODE_NAME HOST_NODE_NAME MODE PUBLIC_PORT HTTP_PORT HTTP_BIND HTTP01_ONLY CONTACT_EMAIL UPDATE_INTERVAL
   unset TOOL_IMAGE CADDY_IMAGE ROLE LOCAL_NODE LEASE_SECONDS
 fi
 cmd=${1:-help}
@@ -23,7 +23,7 @@ case "$cmd" in
     fi
     exec 3<>/dev/tty
     while :; do
-      printf '\n代理管理（用户变更由各节点同步，应用会中断该节点连接）\n1) 我的订阅\n2) 添加朋友并显示订阅\n3) 撤销朋友\n4) 服务和规则状态\n5) 刷新规则\n6) 更新 v1.0.0 镜像\n7) 节点同步状态\n8) 生成限时加入码\n9) 移除节点\n10) 加入已有中心（失败后可重试）\n0) 退出\n选择: ' >&3
+      printf '\n代理管理\n订阅与朋友\n  1) 我的订阅 / QX 链接\n  2) 添加朋友并显示订阅\n  3) 撤销朋友\n服务与完成检查\n  4) 重试完成检查\n  5) 服务和规则状态\n  6) 刷新规则\n  7) 更新 v1.0.0 镜像\n节点管理\n  8) 节点同步状态\n  9) 生成限时加入码\n  10) 移除节点\n  11) 加入已有中心\n  0) 退出\n选择: ' >&3
       IFS= read -r choice <&3 || break
       case "$choice" in
         1) "$0" links --labelled || : ;;
@@ -38,23 +38,24 @@ case "$cmd" in
             case "$answer" in y|Y) "$0" user revoke "$friend" || : ;; esac
           fi
           ;;
-        4) "$0" status || : ;;
-        5) "$0" update-rules || : ;;
-        6)
+        4) "$0" finish || : ;;
+        5) "$0" status || : ;;
+        6) "$0" update-rules || : ;;
+        7)
           printf '拉取 v1.0.0 并更新正在运行的服务；保留 .env、模板和凭据。确认？[y/N]: ' >&3
           IFS= read -r answer <&3 || break
           case "$answer" in y|Y) "$0" upgrade || : ;; esac
           ;;
-        7) "$0" node list || : ;;
-        8) "$0" node code || : ;;
-        9)
+        8) "$0" node list || : ;;
+        9) "$0" node code || : ;;
+        10)
           printf '要移除的节点 ID（从节点状态复制；本机为 local）: ' >&3
           IFS= read -r node_id <&3 || break
           "$0" node remove "$node_id" || :
           ;;
-        10) "$0" node join <&3 || : ;;
+        11) "$0" node join <&3 || : ;;
         0) break ;;
-        *) printf '请选择 0–10。\n' >&3 ;;
+        *) printf '请选择 0–11。\n' >&3 ;;
       esac
     done
     ;;
@@ -89,6 +90,23 @@ case "$cmd" in
       "$0" join
     else
       docker compose run --rm -T --interactive=false --no-deps manager node "$@"
+    fi
+    ;;
+  finish)
+    # Keep Compose lifecycle noise out of the completion result. Never log stdout:
+    # a successful finish intentionally discloses the owner's private link there.
+    finish_log=$(mktemp "${TMPDIR:-/tmp}/proxy-stack-finish.XXXXXXXX")
+    chmod 600 "$finish_log"
+    if docker compose --progress quiet run --rm -T --interactive=false --no-deps manager finish --command "$PWD/proxyctl" "$@" 2>"$finish_log"; then
+      rm -f "$finish_log"
+    else
+      result=$?
+      if [ -s "$finish_log" ]; then
+        printf '诊断日志：%s\n' "$finish_log" >&2
+      else
+        rm -f "$finish_log"
+      fi
+      exit "$result"
     fi
     ;;
   init|links|verify|update-rules|detach)
@@ -126,7 +144,7 @@ case "$cmd" in
     docker compose down
     ;;
   *)
-    echo "Usage: ./proxyctl {menu|init|links [--user NAME] [--labelled]|status|verify|update-rules|upgrade|user add/revoke NAME|node code/list/remove ID|join|detach|up|down}"
+    echo "Usage: ./proxyctl {menu|init|finish [--wait 0..120]|links [--user NAME] [--labelled]|status|verify|update-rules|upgrade|user add/revoke NAME|node code/list/remove ID|join|detach|up|down}"
     exit 2
     ;;
 esac

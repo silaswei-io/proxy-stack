@@ -89,13 +89,14 @@ def caddy(settings, state, external=False):
 
 
 def ip_tls(settings):
-    if not settings.ip:
+    if not settings.ip and not settings.http01_only:
         return ""
+    profile = "            profile shortlived\n" if settings.ip else ""
+    challenge = "            disable_tlsalpn_challenge\n" if settings.http01_only else ""
     return """    tls {
         issuer acme {
             dir https://acme-v02.api.letsencrypt.org/directory
-            profile shortlived
-        }
+""" + profile + challenge + """        }
     }
 """
 

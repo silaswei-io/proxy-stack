@@ -100,10 +100,19 @@ def main(argv=None):
     sub.add_parser("validate-input", help="validate installer inputs without writing data")
     sub.add_parser("detect-public-ip", help="detect a global public IP with bounded HTTPS probes")
     sub.add_parser("default-node-name", help="sanitize the host-provided hostname")
+    sub.add_parser("preview-caddy", help=argparse.SUPPRESS)
+    sub.add_parser("check-address", help=argparse.SUPPRESS)
+    state_parser = sub.add_parser("install-state", help=argparse.SUPPRESS)
+    state_parser.add_argument("action", choices=("check", "save", "apply", "restore", "cancel-enrollment"))
     sub.add_parser("init")
     links = sub.add_parser("links")
     links.add_argument("--user", default="owner", type=username)
     links.add_argument("--labelled", action="store_true", help="label the four private resource URLs")
+    finish_parser = sub.add_parser("finish", help="bounded HTTPS/subscription and node readiness check")
+    finish_parser.add_argument("--wait", type=int, choices=range(0, 121), default=0, metavar="0..120")
+    finish_parser.add_argument("--https-only", action="store_true", help=argparse.SUPPRESS)
+    finish_parser.add_argument("--silent", action="store_true", help=argparse.SUPPRESS)
+    finish_parser.add_argument("--command", dest="display_command", default="./proxyctl", help=argparse.SUPPRESS)
     sub.add_parser("status")
     sub.add_parser("health")
     verify_parser = sub.add_parser("verify")
@@ -133,7 +142,17 @@ def main(argv=None):
         elif args.command == "default-node-name":
             print(default_node_name(os.environ.get("HOST_NODE_NAME", "")))
         elif args.command == "validate-input":
-            Settings.from_env()
+            print(Settings.from_env().domain)
+        elif args.command == "preview-caddy":
+            from . import render
+            settings = Settings.from_env()
+            print(render.caddy(settings, {"ws_path": "/ws/" + "0" * 48}, external=settings.mode == "existing-caddy"))
+        elif args.command == "check-address":
+            from .discovery import check_address
+            check_address(Settings.from_env().domain)
+        elif args.command == "install-state":
+            from .install_state import operate
+            return operate(store, args.action)
         elif args.command == "init":
             store.init(Settings.from_env())
             print("Initialized; credentials preserved. Run links explicitly to display private URLs.")
@@ -210,6 +229,9 @@ def main(argv=None):
                 threading.Event().wait()
             else:
                 serve(store, Settings.from_env().interval)
+        elif args.command == "finish":
+            from .finish import finish
+            return finish(store, args.wait, args.display_command, args.https_only, args.silent)
         elif args.command == "verify":
             print(json.dumps(verify(store, args.base_url), ensure_ascii=False))
         else:

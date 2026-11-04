@@ -48,6 +48,7 @@ class Settings:
     role: str = "hub"
     local_node: bool = True
     lease_seconds: int = 300
+    http01_only: bool = False
 
     @classmethod
     def from_env(cls):
@@ -61,7 +62,8 @@ class Settings:
             raise ValueError("LOCAL_NODE must be true or false")
         return cls(domain, name, port, mode, email, interval,
                    os.environ.get("ROLE", "hub"), os.environ.get("LOCAL_NODE", "true").lower() == "true",
-                   int(os.environ.get("LEASE_SECONDS", "300")))
+                   int(os.environ.get("LEASE_SECONDS", "300")),
+                   os.environ.get("HTTP01_ONLY", "false").lower() == "true")
 
     def __post_init__(self):
         domain, name, port, mode, email, interval = self.domain, self.node_name, self.port, self.mode, self.email, self.interval
@@ -78,6 +80,8 @@ class Settings:
             raise ValueError("NODE_NAME must not collide with a policy name")
         if type(port) is not int or type(interval) is not int or not 1 <= port <= 65535 or not 60 <= interval <= 604800:
             raise ValueError("invalid PUBLIC_PORT or UPDATE_INTERVAL (60..604800 seconds)")
+        if type(self.http01_only) is not bool:
+            raise ValueError("invalid HTTP01_ONLY")
         if self.role not in ("hub", "node") or type(self.local_node) is not bool or type(self.lease_seconds) is not int or not 10 <= self.lease_seconds <= 3600:
             raise ValueError("invalid role, local node flag or lease (10..3600 seconds)")
         if mode not in ("standalone", "existing-caddy"):

@@ -6,6 +6,7 @@ import json
 import os
 import pty
 import select
+import signal
 import subprocess
 import sys
 import tempfile
@@ -25,19 +26,62 @@ from proxy_stack.cli import main
 args = sys.argv[1:]
 with open(os.environ['FAKE_DOCKER_LOG'], 'a') as log:
     log.write(json.dumps(args) + '\n')
+if args[:2] == ['context', 'inspect']:
+    print(os.environ.get('FAKE_DOCKER_ENDPOINT', 'unix:///var/run/docker.sock')); sys.exit(0)
+if args[:2] == ['info', '--format']:
+    print(os.environ.get('FAKE_DOCKER_SECURITY', '[]')); sys.exit(0)
 if args == ['info']:
     sys.exit(int(os.environ.get('FAKE_DOCKER_DOWN', '0')))
 if args[:3] == ['compose', 'version', '--short']:
     print(os.environ.get('FAKE_COMPOSE_VERSION', '2.24.4')); sys.exit(0)
+if args[:3] == ['compose', '--progress', 'quiet']:
+    args = ['compose'] + args[3:]
 if args[0] == 'pull':
-    assert args == ['pull', 'ghcr.io/silaswei/proxy-stack:v1.0.0']
+    assert args[1] == 'ghcr.io/silaswei/proxy-stack:v1.0.0' or args[1].startswith('caddy:2.11.4@sha256:')
+    print('fake Docker pull progress', file=sys.stderr)
+    sys.exit(int(os.environ.get('FAKE_PULL_FAIL', '0')))
+if args[0] in ('network', 'volume') and args[1] == 'ls':
+    sys.exit(0)
+if args[0] == 'inspect':
+    if 'NetworkSettings.Ports' in args[args.index('--format') + 1]:
+        print(os.environ.get('FAKE_BINDINGS', ''))
+    else:
+        values = dict(line.split('=', 1) for line in Path(os.environ.get('FAKE_OWNED_DIRECTORY', '.'), '.env').read_text().splitlines() if '=' in line and not line.startswith('#'))
+        print(values['COMPOSE_PROJECT_NAME'] + '|caddy|' + os.environ.get('FAKE_OWNED_DIRECTORY', str(Path.cwd())) + '|true')
+    sys.exit(0)
+if args[0] == 'ps':
     sys.exit(0)
 if args[0] == 'rm':
     sys.exit(0)
+def patch_control():
+    if os.environ.get('FAKE_JOIN_HUB'):
+        from proxy_stack import control
+        from proxy_stack.storage import Store
+        hub = control.Hub(Store(os.environ['FAKE_JOIN_HUB']))
+        def local_request(origin, action, data, authorization=None):
+            assert origin == hub.store.settings(hub.store.state()).origin
+            if os.environ.get('FAKE_JOIN_FAIL') and action == 'enroll' or os.environ.get('FAKE_CANCEL_FAIL') and action == 'detach':
+                raise OSError('simulated offline hub')
+            try:
+                return hub.enroll(data) if action == 'enroll' else hub.exchange(action, data, authorization)
+            except PermissionError:
+                import urllib.error
+                raise urllib.error.HTTPError(origin,403,'unauthorized',None,None)
+        control.request = local_request
 if args[0] == 'run':
+    if any(arg.startswith('caddy:2.11.4@sha256:') for arg in args):
+        sys.exit(int(os.environ.get('FAKE_CANDIDATE_FAIL', '0')))
+    if args[-1] == 'check-address':
+        sys.exit(0)
     if '-p' in args:
         binding = args[args.index('-p') + 1].rsplit(':', 1)[0]
-        sys.exit(1 if binding in os.environ.get('FAKE_BUSY_PORTS', '').split(',') else 0)
+        busy = binding in os.environ.get('FAKE_BUSY_PORTS', '').split(',')
+        if os.environ.get('FAKE_BUSY_ALL_HIGH') and binding.isdigit() and int(binding) >= 20000:
+            busy = True
+        if os.environ.get('FAKE_RACE_PORT') == binding:
+            count = sum(1 for line in Path(os.environ['FAKE_DOCKER_LOG']).read_text().splitlines() if '-p' in json.loads(line) and binding + ':8080' in json.loads(line))
+            busy = busy or count >= 2
+        sys.exit(1 if busy else 0)
     for i, arg in enumerate(args):
         if arg == '-e':
             key, value = args[i + 1].split('=', 1)
@@ -46,6 +90,24 @@ if args[0] == 'run':
         if os.environ.get('FAKE_IP_FAILURE'):
             sys.exit(1)
         print(os.environ.get('FAKE_PUBLIC_IP', '8.8.8.8')); sys.exit(0)
+    if args[-1] == 'join':
+        for i, arg in enumerate(args):
+            if arg == '-v' and args[i + 1].endswith(':/data'):
+                os.environ['PROXY_STACK_DATA'] = args[i + 1][:-len(':/data')]
+        patch_control()
+    if 'install-state' in args:
+        from proxy_stack import install_state
+        for i, arg in enumerate(args):
+            if arg == '-v' and ':/data' in args[i + 1]:
+                os.environ['PROXY_STACK_DATA'] = args[i + 1].split(':/data')[0]
+            if arg == '-v' and args[i + 1].endswith(':/transaction'):
+                install_state.TRANSACTION = Path(args[i + 1][:-len(':/transaction')])
+        patch_control()
+        if args[-1] == 'apply' and os.environ.get('FAKE_STATE_APPLY_FAIL'):
+            # Simulate a failure after regenerated files were already written.
+            main(['install-state', 'apply'])
+            sys.exit(1)
+        sys.exit(main(['install-state', args[-1]]))
     sys.exit(main([args[-1]]))
 assert args[0] == 'compose', args
 assert os.environ.get('COMPOSE_FILE') != '/unrelated/compose.yaml', 'inherited Compose configuration'
@@ -60,28 +122,83 @@ if args[1] == 'run':
             key, value = line.split('=', 1)
             os.environ.setdefault(key, value.strip("'"))
     os.environ['PROXY_STACK_DATA'] = str(Path('data').absolute())
-    if args[-1] == 'join' and os.environ.get('FAKE_JOIN_HUB'):
-        from proxy_stack import control
-        from proxy_stack.storage import Store
-        hub = control.Hub(Store(os.environ['FAKE_JOIN_HUB']))
-        def local_request(origin, action, data, authorization=None):
-            assert origin == hub.store.settings(hub.store.state()).origin
-            if os.environ.get('FAKE_JOIN_FAIL'):
-                raise OSError('simulated offline hub')
-            try:
-                return hub.enroll(data) if action == 'enroll' else hub.exchange(action, data, authorization)
-            except PermissionError:
-                import urllib.error
-                raise urllib.error.HTTPError(origin,403,'unauthorized',None,None)
-        control.request = local_request
+    patch_control()
+    if args[-1] == 'init' and os.environ.get('FAKE_INIT_FAIL'):
+        main(['init'])
+        sys.exit(1)
+    if 'finish' in args:
+        from proxy_stack import finish
+        from email.message import Message
+        import io
+        original_check = finish.check
+        finish.check = lambda root, wait, https_only=False: original_check(root, 0, https_only)
+        class Response(io.BytesIO):
+            status = 200
+            headers = Message()
+            headers['Content-Type'] = 'application/yaml'
+            headers['Cache-Control'] = 'no-store'
+        class Opener:
+            def open(self, req, timeout):
+                if os.environ.get('FAKE_HTTPS_READY') != '1':
+                    raise OSError('offline')
+                from proxy_stack.storage import Store
+                store = Store(os.environ['PROXY_STACK_DATA'])
+                token = store.state()['users']['owner']['token']
+                return Response((store.current() / ('sub/' + token + '/clash.yaml')).read_bytes())
+        finish.urllib.request.build_opener = lambda *args: Opener()
+        class WebSocket:
+            # urllib's HTTPSHandler reads these class attributes even when its
+            # opener is stubbed; keep the WSS fixture compatible with Python 3.13.
+            debuglevel = 0
+            _http_vsn = 11
+            def __init__(self, *args, **kwargs):
+                pass
+            def request(self, method, path, headers):
+                if os.environ.get('FAKE_HTTPS_READY') != '1':
+                    raise OSError('offline public TLS')
+                self.key = headers['Sec-WebSocket-Key']
+            def getresponse(self):
+                import base64, hashlib
+                accept = base64.b64encode(hashlib.sha1((self.key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()).decode()
+                return type('WS', (), {'status': 101, 'getheader': lambda _, k, default=None: {'Upgrade': 'websocket', 'Sec-WebSocket-Accept': accept}.get(k, default)})()
+            def close(self):
+                pass
+        finish.http.client.HTTPSConnection = WebSocket
     if 'update-rules' in args:
         from proxy_stack.storage import Store
         from proxy_stack.rules import bootstrap
         update = Store.update
         Store.update = lambda self: update(self, lambda name: bootstrap()['lists'][name])
     sys.exit(main(args[args.index('manager') + 1:]))
+if args[1] == 'up':
+    if os.environ.get('FAKE_UP_PAUSE'):
+        import time
+        time.sleep(30)
+    if os.environ.get('FAKE_ACK') == '1':
+        from proxy_stack.storage import Store
+        from proxy_stack.control import Hub
+        store = Store(Path('data').absolute())
+        state = store.state()
+        if state['settings']['role'] == 'hub' and state['settings']['local_node']:
+            hub = Hub(store)
+            desired = hub.exchange('poll', {'generation': state['nodes']['local']['acked'] if '--no-recreate' in args else 0}, local=True)
+            hub.exchange('ack', {'generation': desired['generation']}, local=True)
+    if os.environ.get('FAKE_NODE_ACK') == '1':
+        import time
+        from proxy_stack.storage import Store, atomic_file
+        from proxy_stack.control import Hub
+        node = Store(Path('data').absolute())
+        peer = node.read(node.model / 'peer.json')
+        hub = Hub(Store(os.environ['FAKE_JOIN_HUB']))
+        authorization = 'Bearer ' + peer['id'] + ':' + peer['token']
+        desired = hub.exchange('poll', {'generation': 0}, authorization)
+        hub.exchange('ack', {'generation': desired['generation']}, authorization)
+        atomic_file(node.runtime / 'node-status.json', json.dumps({'at': time.time(), 'running': True,
+            'generation': desired['generation'], 'desired': desired['generation'], 'lease_remaining': 300, 'error': None}))
+    print('fake Docker up progress', file=sys.stderr)
+    sys.exit(int(os.environ.get('FAKE_UP_FAIL', '0')))
 if args[1] == 'ps' and '-q' in args:
-    print('fake-running-xray')
+    print('a' * 64 if os.environ.get('FAKE_OWNED_CADDY') else 'fake-running-xray')
 sys.exit(0)
 '''
 
@@ -103,13 +220,13 @@ class InstallerTests(unittest.TestCase):
         hostname.chmod(0o700)
         self.log = self.root / "docker.jsonl"
         self.env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ["PATH"],
-                        FAKE_DOCKER_LOG=str(self.log))
+                        FAKE_DOCKER_LOG=str(self.log), FAKE_HTTPS_READY='1', FAKE_ACK='1')
         self.payload = script()
 
     def install(self, *args, inputs=True, env=None):
         command = ["bash", "-s", "--", "--directory", str(self.destination), "--non-interactive"]
         if inputs:
-            command += ["--domain", "Proxy.Example.com", "--name", "测试 VPS"]
+            command += ["--domain", "Proxy.Example.com", "--name", "测试 VPS", "--port", "34567"]
         return subprocess.run(command + list(args), input=self.payload, text=True, capture_output=True,
                               env=env or self.env, start_new_session=True, timeout=15)
 
@@ -131,15 +248,15 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("ghcr.io/silaswei/proxy-stack:" + __version__, (self.destination / ".env").read_text())
         self.assertNotIn("EXPORT_TEMPLATES", exported)
 
-    def test_fresh_install_links_before_up_and_truthful_status(self):
-        result = self.install(env=dict(self.env, DOMAIN='unrelated.example.com', NODE_NAME='Unrelated',
+    def test_fresh_install_finishes_after_up_without_unverified_links(self):
+        result = self.install('--role', 'hub-only', env=dict(self.env, DOMAIN='unrelated.example.com', NODE_NAME='Unrelated',
                                        COMPOSE_FILE='/unrelated/compose.yaml', COMPOSE_PROJECT_NAME='unrelated'))
         self.assert_ok(result)
-        self.assertIn("Mihomo / Clash Meta: https://proxy.example.com/sub/", result.stdout)
-        self.assertIn("QX 完整配置（iOS 待验证）:", result.stdout)
-        self.assertIn("TLS 尚未验证", result.stdout)
+        self.assertNotIn("/sub/", result.stdout + result.stderr)
+        self.assertIn("HTTPS 已验证", result.stdout)
+        self.assertIn("等待就绪节点回执", result.stdout)
         self.assertIn("minimal-bootstrap", result.stdout)
-        self.assertIn(str(self.destination).replace(" ", "\\ ") + "/proxyctl menu", result.stdout)
+        self.assertIn("proxyctl' menu", result.stdout)
         state = json.loads((self.destination / "data/model/state.json").read_text())
         self.assertEqual(state["settings"]["node_name"], "测试 VPS")
         project = next(line for line in (self.destination / '.env').read_text().splitlines()
@@ -147,26 +264,165 @@ class InstallerTests(unittest.TestCase):
         self.assertRegex(project, r'^COMPOSE_PROJECT_NAME=proxy-stack-\d+-\d+-\d+$')
         self.assertEqual((self.destination / ".env").stat().st_mode & 0o777, 0o600)
         calls = self.calls()
-        links = next(i for i, call in enumerate(calls) if "links" in call)
-        up = calls.index(["compose", "up", "-d"])
-        self.assertLess(links, up)
+        finish = next(i for i, call in enumerate(calls) if "finish" in call)
+        up = calls.index(["compose", "up", "-d", "--force-recreate"])
+        self.assertGreater(finish, up)
+        self.assertFalse(any("links" in c for c in calls))
+        self.assertIn("--wait", calls[finish])
         self.assertFalse(any("status" in c or "verify" in c for c in calls))
         # The secret links are only stdout, never command arguments/ordinary logs.
         self.assertNotIn(state["users"]["owner"]["token"], self.log.read_text())
         self.assertNotIn(state["users"]["owner"]["token"], result.stderr)
 
-    def test_repeat_preserves_all_configuration_and_credentials(self):
-        self.assert_ok(self.install("--prepare-only"))
-        (self.destination / ".env").write_text((self.destination / ".env").read_text() + "# keep my config\n")
-        before = {str(p.relative_to(self.destination)): p.read_bytes()
-                  for p in self.destination.rglob("*") if p.is_file()}
-        self.log.write_text("")
-        result = self.install("--domain", "different.example.com", "--name", "Different")
+    def test_hub_only_pending_nodes_is_quiet_and_private_logs_retain_docker_errors(self):
+        result = self.install('--role', 'hub-only')
         self.assert_ok(result)
-        self.assertIn("https://proxy.example.com/sub/", result.stdout)
-        self.assertEqual(before, {str(p.relative_to(self.destination)): p.read_bytes()
-                                  for p in self.destination.rglob("*") if p.is_file()})
-        self.assertFalse(any("init" in c or "up" in c or "validate-input" in c for c in self.calls()))
+        self.assertIn('HTTPS 已验证', result.stdout)
+        self.assertNotIn('/sub/', result.stdout + result.stderr)
+        self.assertNotIn('fake Docker', result.stdout + result.stderr)
+        log_path = Path(result.stdout.split('安装日志/恢复记录：')[1].strip()) / 'operator.log'
+        # Transaction journals intentionally retain recovery evidence.
+        self.assertEqual(log_path.stat().st_mode & 0o777, 0o600)
+        self.assertIn('fake Docker pull progress', log_path.read_text())
+        self.assertIn('fake Docker up progress', log_path.read_text())
+        owner = json.loads((self.destination / 'data/model/state.json').read_text())['users']['owner']
+        for secret in owner.values():
+            self.assertNotIn(secret, log_path.read_text() + self.log.read_text() + result.stderr)
+        self.assertEqual(self.calls().count(['pull', 'ghcr.io/silaswei/proxy-stack:v1.0.0']), 1)
+        self.assertFalse(any('links' in c or 'verify' in c for c in self.calls()))
+
+    def test_failed_pull_retains_useful_private_log_and_no_install(self):
+        result = self.install(env=dict(self.env, FAKE_PULL_FAIL='1'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('诊断日志：', result.stderr)
+        self.assertNotIn('fake Docker', result.stdout + result.stderr)
+        log_path = Path(result.stderr.split('诊断日志：')[1].splitlines()[0])
+        # Transaction journals intentionally retain recovery evidence.
+        self.assertIn('fake Docker pull progress', log_path.read_text())
+        self.assertEqual(log_path.stat().st_mode & 0o777, 0o600)
+        self.assertFalse(self.destination.exists())
+
+    def test_retry_finish_in_menu_and_managed_installer_preserves_identity(self):
+        from proxy_stack.control import Hub
+        from proxy_stack.storage import Store
+        self.assert_ok(self.install('--prepare-only'))
+        store = Store(self.destination / 'data')
+        hub = Hub(store)
+        generation = hub.exchange('poll', {'generation': 0}, local=True)['generation']
+        hub.exchange('ack', {'generation': generation}, local=True)
+        before = {str(p.relative_to(self.destination)): p.read_bytes()
+                  for p in self.destination.rglob('*') if p.is_file()}
+        self.env['FAKE_HTTPS_READY'] = '1'
+        self.log.write_text('')
+        result = self.install()
+        self.assert_ok(result)
+        self.assertIn('订阅就绪', result.stdout)
+        self.assertEqual(result.stdout.count('https://'), 1)
+        self.assertIn('/sub/', result.stdout)
+        after = {str(p.relative_to(self.destination)): p.read_bytes()
+                 for p in self.destination.rglob('*') if p.is_file()}
+        self.assertEqual({k:v for k,v in before.items() if k != 'data/model/heartbeats.json'},
+                         {k:v for k,v in after.items() if k != 'data/model/heartbeats.json'})
+        self.assertFalse(any('init' in c or c[0] == 'pull' and c[1] == 'ghcr.io/silaswei/proxy-stack:v1.0.0' for c in self.calls()))
+        code, output = self.terminal([str(self.destination / 'proxyctl'), 'menu'], '4\n0\n')
+        self.assertEqual(code, 0, output)
+        self.assertIn('订阅就绪', output)
+        self.assertIn('服务与完成检查', output)
+        self.assertNotIn('代理管理（', output)
+
+    def test_repeat_explicit_settings_refresh_templates_and_preserve_credentials(self):
+        self.assert_ok(self.install('--prepare-only'))
+        (self.destination / '.env').write_text((self.destination / '.env').read_text() + '# keep my config\n')
+        original = json.loads((self.destination / 'data/model/state.json').read_text())
+        # Simulate the still-published same-v1 wrapper. Only the authorized
+        # installer transaction refreshes templates; init remains immutable.
+        (self.destination / 'proxyctl').write_text((self.destination / 'proxyctl').read_text() + '# older same-v1 wrapper\n')
+        self.log.write_text('')
+        result = self.install('--domain', 'different.example.com', '--name', 'Different', '--port', '45678')
+        self.assert_ok(result)
+        updated = json.loads((self.destination / 'data/model/state.json').read_text())
+        self.assertEqual(updated['settings']['domain'], 'different.example.com')
+        self.assertEqual(updated['settings']['node_name'], 'Different')
+        self.assertEqual(updated['settings']['port'], 45678)
+        self.assertEqual(updated['users'], original['users'])
+        self.assertEqual(updated['ws_path'], original['ws_path'])
+        self.assertIn('# keep my config', (self.destination / '.env').read_text())
+        self.assertEqual((self.destination / 'proxyctl').read_text(), files('proxy_stack').joinpath('templates/proxyctl').read_text())
+        self.assertFalse(any('init' in c for c in self.calls()))
+        self.assertTrue(any('--force-recreate' in c for c in self.calls()))
+        self.assertIn(':45678/sub/', result.stdout)
+
+    def test_reconfigure_rolls_back_exact_files_state_and_prior_services(self):
+        self.assert_ok(self.install('--prepare-only'))
+        original = {str(p.relative_to(self.destination)): p.read_bytes()
+                    for p in self.destination.rglob('*') if p.is_file()}
+        for changes in ({'FAKE_STATE_APPLY_FAIL': '1'}, {'FAKE_UP_FAIL': '1'}, {'FAKE_HTTPS_READY': '0'}):
+            with self.subTest(changes=changes):
+                self.log.write_text('')
+                result = self.install('--port', '45678', env=dict(self.env, **changes))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('已回滚', result.stderr)
+                self.assertNotIn('/sub/', result.stdout + result.stderr)
+                self.assertEqual(original, {str(p.relative_to(self.destination)): p.read_bytes()
+                                            for p in self.destination.rglob('*') if p.is_file()})
+                self.assertFalse(Path(str(self.destination) + '.install-lock').exists())
+                restored = [c for c in self.calls() if c[:2] == ['compose', '--project-name'] and 'up' in c]
+                self.assertEqual(len(restored), 1)
+                self.assertEqual(restored[0][-4:], ['hub', 'xray', 'updater', 'caddy'])
+
+    def test_unchanged_repeat_https_failure_leaves_prior_containers_and_identity(self):
+        self.assert_ok(self.install('--prepare-only'))
+        before = json.loads((self.destination / 'data/model/state.json').read_text())
+        dotenv = (self.destination / '.env').read_bytes()
+        self.log.write_text('')
+        result = self.install(env=dict(self.env, FAKE_HTTPS_READY='0'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('已回滚', result.stderr)
+        self.assertTrue(self.destination.exists())
+        after = json.loads((self.destination / 'data/model/state.json').read_text())
+        self.assertEqual(after['users'], before['users'])
+        self.assertEqual(after['ws_path'], before['ws_path'])
+        self.assertEqual((self.destination / '.env').read_bytes(), dotenv)
+        self.assertFalse(any('down' in c or 'stop' in c for c in self.calls()))
+        self.assertTrue(any('--no-recreate' in c for c in self.calls()))
+
+    def test_standalone_https_failure_gates_commit_and_retains_private_log(self):
+        result = self.install(env=dict(self.env, FAKE_HTTPS_READY='0'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('HTTPS / 节点运行同步待完成', result.stderr)
+        self.assertIn('已回滚', result.stderr)
+        self.assertFalse(self.destination.exists())
+        self.assertNotIn('/sub/', result.stdout + result.stderr)
+        stage = Path(result.stderr.split('备份/日志：')[1].strip())
+        self.assertEqual((stage / 'phase').read_text().strip(), 'rolled-back')
+        self.assertTrue((stage / 'failed-install/data/model/state.json').exists())
+        call = next(c for c in self.calls() if 'finish' in c)
+        self.assertIn('120', call)
+        self.assertIn('--https-only', call)
+        self.assertIn('--silent', call)
+        self.assertNotIn('fake Docker', result.stdout + result.stderr)
+
+    def test_pending_same_v1_external_install_retries_with_high_port_and_preserved_identity(self):
+        self.assert_ok(self.install('--mode', 'existing-caddy', '--prepare-only'))
+        before = json.loads((self.destination / 'data/model/state.json').read_text())
+        # Original same-v1 template has none of the new orchestration commands.
+        old = self.destination / 'compose.yaml'
+        old.write_text(old.read_text().replace('HTTP01_ONLY: ${HTTP01_ONLY:-false}', 'HTTP01_ONLY: false'))
+        host = self.fake_host()
+        original_host = host.config.read_bytes()
+        result = self.install('--manage-host-caddy', '--port', '45678',
+                              env=dict(self.env, FAKE_BUSY_PORTS='80,443', FAKE_ACK='1'))
+        self.assert_ok(result)
+        after = json.loads((self.destination / 'data/model/state.json').read_text())
+        self.assertEqual(after['users'], before['users'])
+        self.assertEqual(after['ws_path'], before['ws_path'])
+        self.assertEqual(after['settings']['mode'], 'standalone')
+        self.assertEqual(after['settings']['port'], 45678)
+        self.assertTrue(after['settings']['http01_only'])
+        self.assertNotIn('COMPOSE_FILE=', '\n'.join(line for line in (self.destination / '.env').read_text().splitlines() if not line.startswith('#')))
+        self.assertIn(':45678/sub/', result.stdout)
+        self.assertTrue(host.config.read_bytes().startswith(original_host))
+
 
     def join_hub(self):
         from proxy_stack.storage import Store
@@ -195,41 +451,78 @@ class InstallerTests(unittest.TestCase):
             self.assertNotIn(secret, self.log.read_text())
             self.assertNotIn(secret, result.stdout + result.stderr)
         self.assertNotIn('owner 私密订阅', result.stdout)
-        self.assertIn('统一订阅链接请从中心获取', result.stdout)
+        self.assertIn('未检查公网就绪', result.stdout)
         repeated = self.install('--prepare-only')
         self.assert_ok(repeated)
         self.assertEqual(json.loads((self.destination / 'data/model/peer.json').read_text()), peer)
 
-    def test_hub_only_interactive_and_join_retry_preserves_install(self):
-        from proxy_stack.storage import Store
-        from proxy_stack.control import Hub
+    def test_failed_join_rolls_back_fresh_install_and_preserves_private_backup(self):
         hub, code, code_file = self.join_hub()
         failed = self.install('--role', 'node', '--join-code-file', str(code_file), '--prepare-only',
                               env=dict(self.env, FAKE_JOIN_FAIL='1'))
         self.assertNotEqual(failed.returncode, 0)
-        self.assertIn("node join", failed.stderr)
-        self.assertIn(" up", failed.stderr)
-        store = Store(self.destination / 'data')
-        state = store.state()
-        dotenv = (self.destination / '.env').read_bytes()
-        self.assertFalse((store.model / 'peer.json').exists())
-        # Retry after init failure through the normal wrapper, no state deletion.
-        result = subprocess.run([str(self.destination / 'proxyctl'), 'node', 'join'],
-                                input=code + '\n', env=self.env, text=True, capture_output=True, timeout=10)
+        self.assertIn('已回滚', failed.stderr)
+        self.assertFalse(self.destination.exists())
+        transaction = Path(failed.stderr.split('备份/日志：')[1].strip())
+        self.assertTrue((transaction / 'failed-install/data/model/state.json').exists())
+        self.assertEqual((transaction / 'phase').read_text().strip(), 'rolled-back')
+        self.assertTrue(any(c[:2] == ['compose', '--project-name'] and 'down' in c for c in self.calls()))
+        self.assertNotIn(code, failed.stdout + failed.stderr + (transaction / 'operator.log').read_text())
+
+    def test_node_ready_checks_public_wss_and_failed_public_tls_revokes_ready_enrollment(self):
+        from proxy_stack.control import Hub
+        hub, code, code_file = self.join_hub()
+        result = self.install('--role', 'node', '--join-code-file', str(code_file),
+                              env=dict(self.env, FAKE_NODE_ACK='1', FAKE_HTTPS_READY='0'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('已回滚', result.stderr)
+        self.assertEqual(Hub(hub).status()[0]['status'], 'removed')
+        self.assertFalse(self.destination.exists())
+        self.assertNotIn('/sub/', result.stdout + result.stderr)
+        invitation = Hub(hub).code()
+        code_file.write_text(invitation + '\n')
+        result = self.install('--role', 'node', '--join-code-file', str(code_file),
+                              env=dict(self.env, FAKE_NODE_ACK='1'))
         self.assert_ok(result)
-        self.assertEqual(store.state(), state)
-        self.assertEqual((self.destination / '.env').read_bytes(), dotenv)
-        self.assertTrue((store.model / 'peer.json').exists())
-        self.assertEqual(len(Hub(hub).status()), 1)
+        self.assertIn('节点就绪：公共 HTTPS/WSS、本机运行及同步已确认', result.stdout)
+        self.assertNotIn('/sub/', result.stdout)
+
+    def test_offline_enrollment_rollback_keeps_scoped_identity_and_normal_retry_recovers(self):
+        from proxy_stack.control import Hub
+        hub, code, code_file = self.join_hub()
+        result = self.install('--role', 'node', '--join-code-file', str(code_file),
+                              env=dict(self.env, FAKE_HTTPS_READY='0', FAKE_CANCEL_FAIL='1'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('--recover', result.stderr)
+        lock = Path(str(self.destination) + '.install-lock')
+        self.assertTrue(lock.exists())
+        stage = Path((lock / 'owner').read_text().strip())
+        self.assertEqual((stage / 'phase').read_text().strip(), 'recovery-required')
+        self.assertTrue((self.destination / 'data/model/peer.json').exists())
+        self.assertEqual(Hub(hub).status()[0]['status'], 'pending')
+        result = self.install('--check', inputs=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(lock.exists())
+        # The normal rerun discovers recovery automatically, revokes the scoped
+        # enrollment, and then performs the requested fresh dry-run preflight.
+        result = self.install(inputs=False)
+        self.assert_ok(result)
+        self.assertIn('上次事务已恢复', result.stdout)
+        self.assertEqual(Hub(hub).status()[0]['status'], 'removed')
+        self.assertFalse(lock.exists())
+        self.assertTrue((stage / 'failed-install/data/model/enrollment-rollback.json').exists())
+        self.assertNotIn(code, result.stdout + result.stderr + (stage / 'operator.log').read_text())
 
     def test_interactive_roles_use_tty_and_hub_only_has_no_local_node(self):
         installer_file = self.root / 'installer.sh'
         installer_file.write_text(self.payload)
-        code, output = self.terminal(['bash', '-c', 'cat "$1" | bash -s -- --directory "$2" --prepare-only',
+        code, output = self.terminal(['bash', '-c', 'cat "$1" | bash -s -- --directory "$2" --port 34567 --prepare-only',
                                      'installer-test', str(installer_file), str(self.destination)],
                                     '2\nproxy.example.com\nHub Only\n')
         self.assertEqual(code, 0, output)
         self.assertIn('仅订阅中心', output)
+        self.assertIn('1) 中心 + 本机节点（默认）\r\n  2)', output)
+        self.assertIn('选择 [1]:', output)
         state = json.loads((self.destination / 'data/model/state.json').read_text())
         self.assertFalse(state['settings']['local_node'])
         self.assertEqual(state['nodes'], {})
@@ -239,9 +532,9 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(self.calls().count(['pull', 'ghcr.io/silaswei/proxy-stack:v1.0.0']), 1)
         before = {str(p.relative_to(self.destination)): p.read_bytes() for p in self.destination.rglob('*') if p.is_file()}
         self.log.write_text('')
-        self.assert_ok(self.install('--prepare-only'))
+        self.assert_ok(self.install('--prepare-only', inputs=False))
         self.assertFalse(any(call[0] == 'pull' for call in self.calls()))
-        result = subprocess.run([str(self.destination / 'proxyctl'), 'upgrade'], env=self.env,
+        result = subprocess.run([str(self.destination / 'proxyctl'), 'upgrade'], env=dict(self.env, FAKE_ACK='0'),
                                 text=True, capture_output=True, timeout=10)
         self.assert_ok(result)
         self.assertEqual(self.calls().count(['pull', 'ghcr.io/silaswei/proxy-stack:v1.0.0']), 1)
@@ -298,8 +591,8 @@ class InstallerTests(unittest.TestCase):
         state = json.loads((self.destination / "data/model/state.json").read_text())
         self.assertEqual(state["settings"]["domain"], "8.8.8.8")
         self.assertEqual(state["settings"]["node_name"], "test-host_01")
-        self.assertIn("无需域名/DNS", result.stdout)
-        self.assertIn("证书签发待完成", result.stdout)
+        self.assertIn("未检查公网就绪", result.stdout)
+        self.assertFalse(any("finish" in c or "verify" in c or "up" in c for c in self.calls()))
         self.assertNotIn("A/AAAA", result.stdout)
         self.log.write_text("")
         self.assert_ok(self.install(inputs=False, env=dict(self.env, FAKE_IP_FAILURE="1")))
@@ -311,7 +604,8 @@ class InstallerTests(unittest.TestCase):
         self.assert_ok(result)
         state = json.loads((self.destination / "data/model/state.json").read_text())
         self.assertEqual(state["settings"]["node_name"], "Server-DIRECT")
-        self.assertIn("https://[2606:4700:4700::1111]/sub/", result.stdout)
+        self.assertNotIn("/sub/", result.stdout)
+        self.assertIn("未检查公网就绪", result.stdout)
         self.assertFalse(any("detect-public-ip" in c for c in self.calls()))
 
     def test_hostname_sanitized_without_executing_and_explicit_name_strict(self):
@@ -330,7 +624,7 @@ class InstallerTests(unittest.TestCase):
     def test_enter_twice_accepts_displayed_defaults(self):
         installer_file = self.root / "installer.sh"
         installer_file.write_text(self.payload)
-        code, output = self.terminal(["bash", "-c", 'cat "$1" | bash -s -- --directory "$2" --prepare-only',
+        code, output = self.terminal(["bash", "-c", 'cat "$1" | bash -s -- --directory "$2" --port 34567 --prepare-only',
                                      "installer-test", str(installer_file), str(self.destination)], "1\n\n\n")
         self.assertEqual(code, 0, output)
         self.assertIn("回车使用 8.8.8.8", output)
@@ -343,7 +637,7 @@ class InstallerTests(unittest.TestCase):
         self.env["FAKE_IP_FAILURE"] = "1"
         installer_file = self.root / "installer.sh"
         installer_file.write_text(self.payload)
-        code, output = self.terminal(["bash", "-c", 'cat "$1" | bash -s -- --directory "$2" --prepare-only',
+        code, output = self.terminal(["bash", "-c", 'cat "$1" | bash -s -- --directory "$2" --port 34567 --prepare-only',
                                      "installer-test", str(installer_file), str(self.destination)],
                                     "1\nproxy.example.com\n\n")
         self.assertEqual(code, 0, output)
@@ -358,25 +652,223 @@ class InstallerTests(unittest.TestCase):
             self.assertIn(message, result.stderr)
             self.assertFalse(self.destination.exists())
 
-    def test_conflicts_require_explicit_external_choice_and_check_gateway(self):
-        env = dict(self.env, FAKE_BUSY_PORTS="443")
+    def fake_host(self):
+        from test_host_setup import HostFixture
+        host_root = self.root / 'host'
+        host = HostFixture(host_root)
+        wrapper = self.bin / 'python3'
+        wrapper.write_text('#!' + sys.executable + '\nimport sys\nsys.path.insert(0, ' + repr(str(Path(__file__).parent)) + ')\n'
+                           'from test_host_setup import fixture_main\n'
+                           'sys.exit(fixture_main(' + repr(str(host_root)) + ', sys.argv[2:]))\n')
+        wrapper.chmod(0o700)
+        return host
+
+    def test_occupied_80_host_plan_opt_in_apply_and_https_rollback(self):
+        host = self.fake_host()
+        original = host.config.read_bytes()
+        binary = host.binary.read_bytes()
+        env = dict(self.env, FAKE_BUSY_PORTS='80', FAKE_HTTPS_READY='1', FAKE_ACK='1')
+        result = self.install('--check', env=env)
+        self.assert_ok(result)
+        self.assertIn('HTTP-01 转发', result.stdout)
+        self.assertFalse(self.destination.exists())
+        self.assertEqual(host.config.read_bytes(), original)
         result = self.install(env=env)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("已有反代", result.stdout)
+        self.assertIn('--manage-host-caddy', result.stderr)
         self.assertFalse(self.destination.exists())
-        result = self.install("--mode", "standalone", env=env)
+        result = self.install('--manage-host-caddy', env=dict(env, FAKE_HTTPS_READY='0'))
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("不会停止现有服务", result.stderr)
-        busy_gateway = dict(env, FAKE_BUSY_PORTS="127.0.0.1:18090")
-        result = self.install("--mode", "existing-caddy", env=busy_gateway)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("18090", result.stderr)
-        result = self.install("--mode", "existing-caddy", "--prepare-only", env=env)
+        self.assertIn('已回滚', result.stderr)
+        self.assertFalse(self.destination.exists())
+        self.assertEqual(host.config.read_bytes(), original)
+        self.assertEqual(host.binary.read_bytes(), binary)
+        self.assertNotIn('/sub/', result.stdout + result.stderr)
+        transaction = Path(result.stderr.split('备份/日志：')[1].strip())
+        self.assertEqual((transaction / 'phase').read_text().strip(), 'rolled-back')
+        self.assertEqual(json.loads((transaction / 'host/journal.json').read_text())['phase'], 'rolled-back')
+        self.assertTrue(any(c[:2] == ['compose', '--project-name'] and 'down' in c for c in self.calls()))
+        result = self.install('--manage-host-caddy', env=env)
         self.assert_ok(result)
-        self.assertIn("公共链接在配置完成前不可用", result.stdout)
-        self.assertIn("COMPOSE_FILE=compose.yaml:compose.external.yaml", (self.destination / ".env").read_text())
-        self.assertIn("reverse_proxy 127.0.0.1:18090", (self.destination / "data/runtime/host-caddy.snippet").read_text())
-        self.assertNotIn(["compose", "up", "-d"], self.calls())
+        self.assertIn('订阅就绪', result.stdout)
+        self.assertIn(':34567/sub/', result.stdout)
+        self.assertNotIn('QX 完整配置', result.stdout)
+        state = (self.destination / 'data/model/state.json').read_bytes()
+        dotenv = (self.destination / '.env').read_bytes()
+        self.assertTrue(host.config.read_bytes().startswith(original))
+        self.assertEqual(host.binary.read_bytes(), binary)
+        # Rerun keeps the chosen port, identity and exact managed challenge block.
+        configured = host.config.read_bytes()
+        self.assert_ok(self.install('--manage-host-caddy', '--port', '45678', env=env))
+        self.assertEqual(host.config.read_bytes(), configured)
+        changed = json.loads((self.destination / 'data/model/state.json').read_text())
+        previous = json.loads(state)
+        self.assertEqual(changed['settings']['port'], 45678)
+        self.assertEqual(changed['users'], previous['users'])
+        self.assertEqual(changed['ws_path'], previous['ws_path'])
+        self.assertIn(b'PUBLIC_PORT=45678', (self.destination / '.env').read_bytes())
+        self.assertEqual(host.config.read_bytes(), configured)
+
+    def test_unknown_80_and_host_candidate_failure_precede_install_writes(self):
+        env = dict(self.env, FAKE_BUSY_PORTS='80')
+        result = self.install('--manage-host-caddy', env=env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.destination.exists())
+        host = self.fake_host()
+        original = host.config.read_bytes()
+        result = self.install('--manage-host-caddy', env=dict(env, FAKE_HOST_VALIDATE_FAIL='1'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.destination.exists())
+        self.assertEqual(host.config.read_bytes(), original)
+
+    def test_only_443_busy_needs_no_host_integration_and_explicit_port_conflicts_fail(self):
+        result = self.install('--check', env=dict(self.env, FAKE_BUSY_PORTS='443'))
+        self.assert_ok(result)
+        self.assertIn('HTTPS proxy.example.com:34567', result.stdout)
+        self.assertFalse(self.destination.exists())
+        result = self.install('--port', '443', env=dict(self.env, FAKE_BUSY_PORTS='443'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('443 已占用', result.stderr)
+        self.assertFalse(self.destination.exists())
+        for value in ('abc', '0', '65536', '-1', '80'):
+            self.assertNotEqual(self.install('--port', value).returncode, 0)
+            self.assertFalse(self.destination.exists())
+
+    def test_explicit_expert_prepare_retains_snippet_and_never_starts_or_probes_https(self):
+        result = self.install('--mode', 'existing-caddy', '--prepare-only')
+        self.assert_ok(result)
+        self.assertIn('TLS/global', result.stdout)
+        self.assertNotIn('/sub/', result.stdout)
+        self.assertIn('COMPOSE_FILE=compose.yaml:compose.external.yaml', (self.destination / '.env').read_text())
+        self.assertIn('reverse_proxy 127.0.0.1:18090', (self.destination / 'data/runtime/host-caddy.snippet').read_text())
+        self.assertFalse(any('up' in c or 'finish' in c or 'verify' in c for c in self.calls()))
+
+    def test_check_and_candidate_failure_have_no_install_writes(self):
+        result = self.install('--check')
+        self.assert_ok(result)
+        self.assertIn('未激活服务', result.stdout)
+        self.assertFalse(self.destination.exists())
+        self.assertFalse(any('init' in c or 'up' in c for c in self.calls()))
+        result = self.install(env=dict(self.env, FAKE_CANDIDATE_FAIL='1'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.destination.exists())
+
+    def test_port_recheck_and_bounded_random_failure_leave_no_install(self):
+        result = self.install(env=dict(self.env, FAKE_RACE_PORT='34567'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.destination.exists())
+        self.assertIn('预检后被占用', result.stderr)
+        self.log.write_text('')
+        result = self.install(inputs=False, env=dict(self.env, FAKE_BUSY_ALL_HIGH='1'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('24 次', result.stderr)
+        self.assertFalse(self.destination.exists())
+        self.assertEqual(sum('-p' in c for c in self.calls()), 24)
+
+    def test_random_port_default_is_available_and_persisted(self):
+        result = self.install('--prepare-only', inputs=False)
+        self.assert_ok(result)
+        state = json.loads((self.destination / 'data/model/state.json').read_text())
+        self.assertGreaterEqual(state['settings']['port'], 20000)
+        self.assertLess(state['settings']['port'], 60000)
+        self.assertTrue(state['settings']['http01_only'])
+        before = (self.destination / '.env').read_bytes()
+        self.assert_ok(self.install('--prepare-only', inputs=False))
+        self.assertEqual((self.destination / '.env').read_bytes(), before)
+        self.assert_ok(self.install('--port', '12345', inputs=False))
+        changed = json.loads((self.destination / 'data/model/state.json').read_text())
+        self.assertEqual(changed['settings']['port'], 12345)
+        self.assertEqual(changed['users'], state['users'])
+        self.assertEqual(changed['ws_path'], state['ws_path'])
+
+    def test_init_failure_cleans_own_network_before_up_and_preserves_private_backup(self):
+        result = self.install(env=dict(self.env, FAKE_INIT_FAIL='1'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('已回滚', result.stderr)
+        self.assertFalse(self.destination.exists())
+        stage = Path(result.stderr.split('备份/日志：')[1].strip())
+        self.assertTrue((stage / 'resources-starting').exists())
+        self.assertTrue((stage / 'env.sha256').exists())
+        self.assertTrue((stage / 'failed-install/data/model/state.json').exists())
+        cleanup = [c for c in self.calls() if c[:2] == ['compose', '--project-name'] and 'down' in c]
+        self.assertEqual(len(cleanup), 1)
+        project = next(line.split('=', 1)[1] for line in (stage / 'failed-install/.env').read_text().splitlines()
+                       if line.startswith('COMPOSE_PROJECT_NAME='))
+        self.assertEqual(cleanup[0][2], project)
+        self.assertIn('--volumes', cleanup[0])
+        self.assertFalse(any('up' in c for c in self.calls()))
+
+    def test_local_runtime_failure_never_commits_or_prints_private_links(self):
+        result = self.install(env=dict(self.env, FAKE_ACK='0'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('节点运行同步待完成', result.stderr)
+        self.assertFalse(self.destination.exists())
+        self.assertNotIn('/sub/', result.stdout + result.stderr)
+
+    def test_rootless_remote_and_nonlinux_fail_before_install_writes(self):
+        for changes in ({'FAKE_DOCKER_ENDPOINT': 'ssh://elsewhere'}, {'FAKE_DOCKER_SECURITY': '["name=rootless"]'}):
+            with self.subTest(changes=changes):
+                result = self.install('--check', env=dict(self.env, **changes))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.destination.exists())
+                self.assertFalse(any(c[0] == 'run' for c in self.calls()))
+        uname = self.bin / 'uname'
+        uname.write_text('#!/bin/sh\necho Darwin\n')
+        uname.chmod(0o700)
+        result = self.install('--check')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('仅支持 Linux', result.stderr)
+        self.assertFalse(self.destination.exists())
+
+    def test_owns_binding_normalizes_ipv6_brackets_on_unchanged_repeat(self):
+        self.assert_ok(self.install('--prepare-only', '--domain', '2606:4700:4700::1111'))
+        result = self.install('--check', inputs=False,
+                              env=dict(self.env, FAKE_OWNED_CADDY='1', FAKE_OWNED_DIRECTORY=str(self.destination),
+                                       FAKE_BUSY_PORTS='34567,80,[::]:80',
+                                       FAKE_BINDINGS='34567/tcp :: 34567\n80/tcp :: 80'))
+        self.assert_ok(result)
+        self.assertIn('HTTP-01 [::]:80', result.stdout)
+
+    def test_killed_installer_normal_rerun_and_recover_discover_journal(self):
+        installer = self.root / 'installer.sh'
+        installer.write_text(self.payload)
+        process = subprocess.Popen(['bash', str(installer), '--directory', str(self.destination),
+                                    '--non-interactive', '--domain', '8.8.8.8', '--name', 'Crash', '--port', '34567'],
+                                   env=dict(self.env, FAKE_UP_PAUSE='1'), start_new_session=True,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        lock = Path(str(self.destination) + '.install-lock')
+        stage = None
+        try:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                if (lock / 'owner').exists():
+                    stage = Path((lock / 'owner').read_text().strip())
+                    if (stage / 'resources-starting').exists():
+                        break
+                time.sleep(.03)
+            else:
+                self.fail('installer did not reach activation')
+            active = self.install('--recover', inputs=False)
+            self.assertNotEqual(active.returncode, 0)
+            self.assertIn('仍在运行', active.stderr)
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=2)
+            checked = self.install('--check', inputs=False)
+            self.assertNotEqual(checked.returncode, 0)
+            self.assertIn('--recover', checked.stderr)
+            self.assertTrue(self.destination.exists())
+            self.assertNotEqual((stage / 'phase').read_text().strip(), 'rolled-back')
+            recovered = self.install('--recover', inputs=False)
+            self.assert_ok(recovered)
+            self.assertFalse(self.destination.exists())
+            self.assertFalse(lock.exists())
+            self.assertEqual((stage / 'phase').read_text().strip(), 'rolled-back')
+            self.assert_ok(self.install('--recover', inputs=False))
+            self.assert_ok(self.install())
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=2)
 
     def terminal(self, command, input_text):
         pid, fd = pty.fork()
@@ -418,10 +910,10 @@ class InstallerTests(unittest.TestCase):
         hub, invitation, code_file = self.join_hub()
         installer_file = self.root / 'installer.sh'
         installer_file.write_text(self.payload)
-        command = ['bash','-c','cat "$1" | bash -s -- --directory "$2" --prepare-only',
+        command = ['bash','-c','cat "$1" | bash -s -- --directory "$2" --port 34567 --prepare-only',
                    'installer-test',str(installer_file),str(self.destination)]
-        code, output = self.terminal(command,[('此服务器：','3\n'),('粘贴限时加入码',invitation+'\n'),
-                                             ('代理域名','node.example.com\n'),('节点名称','Joined Node\n')])
+        code, output = self.terminal(command,[('此服务器：','3\n'),('代理域名','node.example.com\n'),
+                                             ('节点名称','Joined Node\n'),('粘贴限时加入码',invitation+'\n')])
         self.assertEqual(code,0,output)
         self.assertNotIn(invitation,output)
         self.assertNotIn(invitation,self.log.read_text())
@@ -436,7 +928,7 @@ class InstallerTests(unittest.TestCase):
         invitation = Hub(hub).code()
         code, output = self.terminal(['bash','-c','printf "unused pipe" | "$1" menu','menu-test',
                                      str(self.destination/'proxyctl')],
-                                    [('选择:','10\n'),('粘贴限时加入码',invitation+'\n'),('选择:','0\n')])
+                                    [('选择:','11\n'),('粘贴限时加入码',invitation+'\n'),('选择:','0\n')])
         self.assertEqual(code,0,output)
         self.assertNotIn(invitation,output)
         self.assertTrue(peer_file.exists())
@@ -445,7 +937,7 @@ class InstallerTests(unittest.TestCase):
         self.assert_ok(self.install("--prepare-only"))
         owner = json.loads((self.destination / "data/model/state.json").read_text())["users"]["owner"]
         code, output = self.terminal([str(self.destination / "proxyctl"), "menu"],
-                                     "1\n2\nalice\n2\nBad Name\n4\n5\n3\nalice\ny\n0\n")
+                                     "1\n2\nalice\n2\nBad Name\n5\n6\n3\nalice\ny\n0\n")
         self.assertEqual(code, 0, output)
         self.assertIn("Mihomo / Clash Meta", output)
         self.assertIn("invalid username value", output)
@@ -465,7 +957,7 @@ class InstallerTests(unittest.TestCase):
         installer_file = self.root / "installer.sh"
         installer_file.write_text(self.payload)
         # The bash stdin is a pipe while the answers arrive on its controlling TTY.
-        code, output = self.terminal(["bash", "-c", 'cat "$1" | bash -s -- --directory "$2" --prepare-only',
+        code, output = self.terminal(["bash", "-c", 'cat "$1" | bash -s -- --directory "$2" --port 34567 --prepare-only',
                                       "installer-test", str(installer_file), str(self.destination)],
                                      "1\nproxy.example.com\n我的 节点\n")
         self.assertEqual(code, 0, output)
