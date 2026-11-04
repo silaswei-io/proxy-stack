@@ -94,9 +94,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="proxy-stack")
     parser.add_argument("--version", action="version", version=__version__)
     sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("installer", help="emit a self-contained Bash installer on stdout")
+    sub.add_parser("validate-input", help="validate installer inputs without writing data")
     sub.add_parser("init")
     links = sub.add_parser("links")
     links.add_argument("--user", default="owner", type=username)
+    links.add_argument("--labelled", action="store_true", help="label the four private resource URLs")
     sub.add_parser("status")
     sub.add_parser("health")
     verify_parser = sub.add_parser("verify")
@@ -107,9 +110,15 @@ def main(argv=None):
     user.add_argument("action", choices=("add", "revoke"))
     user.add_argument("name", type=username)
     args = parser.parse_args(argv)
+    if args.command == "installer":
+        from .installer import script
+        sys.stdout.write(script())
+        return 0
     store = Store(os.environ.get("PROXY_STACK_DATA", "/data"))
     try:
-        if args.command == "init":
+        if args.command == "validate-input":
+            Settings.from_env()
+        elif args.command == "init":
             store.init(Settings.from_env())
             print("Initialized; credentials preserved. Run links explicitly to display private URLs.")
         elif args.command == "user":
@@ -131,8 +140,9 @@ def main(argv=None):
                     if args.user not in state["users"]:
                         raise ValueError("unknown user")
                     url = store.settings(state).origin + "/sub/" + state["users"][args.user]["token"] + "/"
-                    for suffix in ("clash.yaml", "qx/nodes.txt", "qx/full.conf", "qx/rules.list"):
-                        print(url + suffix)
+                    for label, suffix in (("Mihomo / Clash Meta", "clash.yaml"), ("QX 节点", "qx/nodes.txt"),
+                                          ("QX 完整配置（iOS 待验证）", "qx/full.conf"), ("QX 规则", "qx/rules.list")):
+                        print((label + ": " if args.labelled else "") + url + suffix)
                 else:
                     result = store.health()
                     if args.command == "status":

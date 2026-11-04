@@ -1,0 +1,76 @@
+#!/bin/sh
+set -eu
+cd -- "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+command -v docker >/dev/null 2>&1 || { echo "Docker is required" >&2; exit 1; }
+if [ -f .proxy-stack-managed ]; then
+  # Managed installs take their identity/settings from their own .env, not an
+  # unrelated project's exported shell variables. Advanced source use is unchanged.
+  unset COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_PATH_SEPARATOR
+  unset COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE
+  unset DOMAIN NODE_NAME MODE PUBLIC_PORT HTTP_PORT CONTACT_EMAIL UPDATE_INTERVAL
+  unset TOOL_IMAGE XRAY_IMAGE CADDY_IMAGE
+fi
+cmd=${1:-help}
+if [ "$#" -eq 0 ] && [ -t 0 ]; then cmd=menu; fi
+if [ "$#" -gt 0 ]; then shift; fi
+case "$cmd" in
+  menu)
+    [ "$#" -eq 0 ] || { echo "menu takes no options" >&2; exit 2; }
+    # Read the terminal, never the piped installer or a Docker command's stdin.
+    if ! ( : <>/dev/tty ) 2>/dev/null; then
+      echo "菜单需要交互终端；无终端请使用 links、status 或 user 命令。" >&2
+      exit 2
+    fi
+    exec 3<>/dev/tty
+    while :; do
+      printf '\n代理管理（添加/撤销朋友会重启 Xray，中断现有连接）\n1) 我的订阅\n2) 添加朋友并显示订阅\n3) 撤销朋友\n4) 服务和规则状态\n5) 刷新规则\n0) 退出\n选择: ' >&3
+      IFS= read -r choice <&3 || break
+      case "$choice" in
+        1) "$0" links --labelled || : ;;
+        2|3)
+          printf '朋友标识（英文/拼音，小写字母开头，最多32位，可含数字、_、-）: ' >&3
+          IFS= read -r friend <&3 || break
+          if [ "$choice" = 2 ]; then
+            if "$0" user add "$friend"; then "$0" links --user "$friend" --labelled || :; fi
+          else
+            printf '撤销将重启 Xray，中断所有现有连接。确认撤销 %s？[y/N]: ' "$friend" >&3
+            IFS= read -r answer <&3 || break
+            case "$answer" in y|Y) "$0" user revoke "$friend" || : ;; esac
+          fi
+          ;;
+        4) "$0" status || : ;;
+        5) "$0" update-rules || : ;;
+        0) break ;;
+        *) printf '请选择 0–5。\n' >&3 ;;
+      esac
+    done
+    ;;
+  init|links|verify|update-rules)
+    docker compose run --rm -T --interactive=false --no-deps manager "$cmd" "$@"
+    ;;
+  status)
+    docker compose run --rm -T --interactive=false --no-deps manager status "$@"
+    docker compose ps
+    ;;
+  user)
+    # The manager has no Docker access; only this operator wrapper restarts Xray.
+    docker compose run --rm -T --interactive=false --no-deps manager user "$@"
+    if [ -n "$(docker compose ps -q --status running xray)" ]; then
+      docker compose restart xray
+    else
+      echo "Xray is stopped; the next up will load the new users."
+    fi
+    ;;
+  up)
+    docker compose run --rm -T --interactive=false --no-deps manager health >/dev/null
+    docker compose up -d "$@"
+    ;;
+  down)
+    [ "$#" -eq 0 ] || { echo "down takes no options; data and certificates are retained" >&2; exit 2; }
+    docker compose down
+    ;;
+  *)
+    echo "Usage: ./proxyctl {menu|init|links [--user NAME] [--labelled]|status|verify|update-rules|user add/revoke NAME|up|down}"
+    exit 2
+    ;;
+esac

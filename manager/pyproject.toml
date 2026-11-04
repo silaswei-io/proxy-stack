@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "proxy-stack"
-version = "0.1.0"
+version = "0.1.1"
 description = "Personal Docker Compose VLESS/WSS subscription manager"
 requires-python = ">=3.9"
 dependencies = ["PyYAML==6.0.3"]
@@ -17,4 +17,4 @@ proxy-stack = "proxy_stack.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-proxy_stack = ["bootstrap.json"]
+proxy_stack = ["bootstrap.json", "templates/*", "templates/.env.example"]

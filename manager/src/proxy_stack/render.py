@@ -99,7 +99,7 @@ def public_files(settings, state, cache):
             f"obfs=wss, obfs-host={settings.domain}, obfs-uri={state['ws_path']}, "
             f"tls-verification=true, fast-open=false, udp-relay=false, tag={settings.node_name}\n")
         files[base + "qx/rules.list"] = qx_rules
-        files[base + "qx/full.conf"] = f"""# proxy-stack 0.1.0; QX native iOS import remains UNVERIFIED.
+        files[base + "qx/full.conf"] = f"""# proxy-stack 0.1.1; QX native iOS import remains UNVERIFIED.
 # Rules: {cache['quality']}; URLs below are private credentials.
 [general]
 server_check_url = http://www.apple.com/generate_204

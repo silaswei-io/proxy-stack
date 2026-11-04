@@ -1,13 +1,13 @@
 name: release-tool
 on:
   push:
-    tags: [v0.1.0]
+    tags: [v0.1.1]
   workflow_dispatch:
 permissions:
   contents: read
   packages: write
 concurrency:
-  group: release-tool-0.1.0
+  group: release-tool-0.1.1
   cancel-in-progress: false
 jobs:
   publish:
@@ -17,8 +17,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build and test before publication
         run: |
-          docker build -t proxy-stack-tool:0.1.0 -f manager/Dockerfile .
-          docker run --rm --entrypoint python -v "$PWD/tests:/tests:ro" proxy-stack-tool:0.1.0 -m unittest discover -s /tests -v
+          docker build -t proxy-stack-tool:0.1.1 -f manager/Dockerfile .
+          docker run --rm --entrypoint python -v "$PWD/tests:/tests:ro" proxy-stack-tool:0.1.1 -m unittest discover -s /tests -v
           sudo python3 tests/integration/run.py
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -34,9 +34,9 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/silaswei/proxy-stack:0.1.0
+            ghcr.io/silaswei/proxy-stack:0.1.1
             ghcr.io/silaswei/proxy-stack:sha-${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/silaswei/proxy-stack
-            org.opencontainers.image.version=0.1.0
+            org.opencontainers.image.version=0.1.1
             org.opencontainers.image.revision=${{ github.sha }}

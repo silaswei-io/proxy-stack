@@ -1,8 +1,39 @@
-# proxy-stack 0.1.0
+# proxy-stack 0.1.1
+
+已安装 Docker 的服务器上运行：
+
+```sh
+docker run --rm ghcr.io/silaswei/proxy-stack:0.1.1 installer | bash
+```
+
+回答两个问题：**代理域名、节点名称**。工具会生成配置和独立凭据、启动服务，并显示带标签的 owner 私密订阅。默认目录为 root 的 `/opt/proxy-stack`，普通用户的 `~/proxy-stack`；不需要 git、宿主机 Python、手改 `.env` 或 Docker socket 挂载。安装结束显示绝对路径的中文管理菜单命令，例如：
+
+```sh
+/opt/proxy-stack/proxyctl menu
+```
+
+菜单可以查看自己的订阅、添加/撤销朋友、查看服务及规则状态、刷新规则。朋友标识使用英文/拼音；添加或撤销会重启 Xray、中断现有连接。重复安装只打开已有受管目录的菜单（无终端则显示已有链接），保留 `.env`、数据、UUID、token 和模板；拒绝非空未受管目录及符号链接路径。安装中断后可在原目录执行 `./proxyctl init`，再 `./proxyctl up`，不会生成替换已有凭据。
+
+每次新安装在 `.env` 保存独立 Compose 项目名；受管目录的包装器使用自己的 `.env`，忽略当前 shell 中继承的部署/Compose 配置变量，避免影响其他项目。更改部署设置仍需遵循已有设置不可静默迁移的约束。
+
+域名 A/AAAA 必须指向服务器，公网 80/443 和 CAA 必须满足证书签发要求。**Docker 启动成功不代表 TLS 或外部可达性已验证**；安装后按提示等待证书和完整规则，再用菜单查看状态、运行 `proxyctl verify`。初始规则是小型 `minimal-bootstrap`，`rules=upstream` 才表示完整规则已发布。安装器先取得链接再启动 updater，收尾不会等待首次完整规则刷新锁。
+
+80/443 无法绑定时会询问是否使用已有反代模式，仅绑定 `127.0.0.1:18090`，并检查该端口；工具不会停止、覆盖现有服务或修改防火墙/DNS。需手动审查生成的 `data/runtime/host-caddy.snippet`，让主机反代为该域名提供 HTTPS 并指向此网关，完成前公共链接不可用；Nginx 等反代需自行提供等效配置。没有自动适配所有反代环境。
+
+GHCR 包目前为 private，公开前需要有读取权限的 registry 登录。要让新服务器直接匿名运行上述命令，包所有者需在 [包设置](https://github.com/users/silaswei/packages/container/package/proxy-stack) 中将可见性改为 Public；源码仓库继续保持私有。工具不会管理 registry 登录或包权限。
+
+无终端自动化必须显式提供输入，缺失输入会失败而非等待。可先只初始化（不启动服务，仍检查端口）：
+
+```sh
+docker run --rm ghcr.io/silaswei/proxy-stack:0.1.1 installer | bash -s -- \
+  --domain proxy.example.com --name 'My VPS' --directory /opt/proxy-stack \
+  --mode standalone --non-interactive --prepare-only
+# 复用已有反代时用 --mode existing-caddy；默认 auto 遇到端口冲突需要交互选择。
+```
 
 个人 VPS 的 Docker Compose 代理：Xray VLESS + WebSocket + TLS，Caddy 自动证书，以及 Mihomo/Clash Meta、Quantumult X 订阅。国内、局域网和 Apple/iCloud 直连，其余默认代理。每位朋友有独立 UUID 和订阅 token，可单独撤销。
 
-这是小范围的 v0.1.0 实现。**QX 原生 iOS 导入仍未验证**；输出依照官方 sample 的原生 VLESS/WSS 和配置区段语法，结构测试与 HTTP 200 均不等于真实客户端验收。历史上“第 4 行语法错误”的根因没有证实，不能把此前模板调整称为修复成功。参见 [客户端验收](docs/CLIENTS.md)。
+这是小范围的 v0.1.1 实现。**QX 原生 iOS 导入仍未验证**；输出依照官方 sample 的原生 VLESS/WSS 和配置区段语法，结构测试与 HTTP 200 均不等于真实客户端验收。历史上“第 4 行语法错误”的根因没有证实，不能把此前模板调整称为修复成功。参见 [客户端验收](docs/CLIENTS.md)。
 
 ## 环境与边界
 
@@ -12,13 +43,13 @@
 - 不修改宿主机默认路由、系统代理、DNS、现有反代或 systemd 服务。代理流量从 VPS 普通网络出口发出。只支持 TCP；生成的客户端配置关闭 UDP 转发和 IPv6 DNS。
 - WS 本身不是加密层，客户端到 Caddy 的 TLS 提供传输加密；Caddy 到 Xray 的 WS 只走项目 bridge 网络。Xray 不发布宿主机端口。
 - 无面板、计费、Reality、DNS API、自动升级或凭据轮换命令。这些是未来功能，不提供空实现。
-- 固定版本 Xray 会阻止私有地址的代理出站；局域网由客户端规则直连，不通过 VPS 访问服务器内部网络。此版本还会提示 WS 传输已弃用；v0.1.0 按兼容目标保留 WSS，未来迁移需单独验收。
+- 固定版本 Xray 会阻止私有地址的代理出站；局域网由客户端规则直连，不通过 VPS 访问服务器内部网络。此版本还会提示 WS 传输已弃用；v0.1.1 按兼容目标保留 WSS，未来迁移需单独验收。
 
-## 安装与初始化
+## 高级用法：源码 Compose 安装与初始化
 
 源码仓库 [silaswei/proxy-stack](https://github.com/silaswei/proxy-stack) 为私有仓库，克隆前需配置具有该仓库读取权限的 GitHub 身份。下面使用 HTTPS，需通过 Git 凭据管理器等方式认证；也可使用已授权的 SSH key 克隆。源码访问认证与 GHCR 镜像拉取认证是两回事。
 
-默认使用预构建工具镜像 `ghcr.io/silaswei/proxy-stack:0.1.0`。安装前确认发布流程已生成此标签；若标签尚不可用，可使用下方本地构建方案。目标为公开 GHCR 包，公开后可匿名拉取；若包仍为 private/internal，则需先登录 GHCR，身份必须有该包的读取权限，使用 PAT (classic) 时需 `read:packages`（组织要求时还需 SSO 授权）。拥有源码仓库读取权限不代表 Docker 已登录 registry；私有源码仓库也不意味着关联包必然私有。本文不将计划中的发布视为已经成功。
+默认使用预构建工具镜像 `ghcr.io/silaswei/proxy-stack:0.1.1`。安装前确认发布流程已生成此标签；若标签尚不可用，可使用下方本地构建方案。目标为公开 GHCR 包，公开后可匿名拉取；若包仍为 private/internal，则需先登录 GHCR，身份必须有该包的读取权限，使用 PAT (classic) 时需 `read:packages`（组织要求时还需 SSO 授权）。拥有源码仓库读取权限不代表 Docker 已登录 registry；私有源码仓库也不意味着关联包必然私有。本文不将计划中的发布视为已经成功。
 
 ```sh
 git clone https://github.com/silaswei/proxy-stack.git
@@ -38,7 +69,7 @@ docker compose up -d
 需要本地构建时，先完成上述克隆及 `.env` 配置，将 `.env` 中的工具镜像改为：
 
 ```dotenv
-TOOL_IMAGE=proxy-stack-tool:0.1.0
+TOOL_IMAGE=proxy-stack-tool:0.1.1
 ```
 
 然后用以下命令替代预构建工具镜像的拉取与启动步骤：
@@ -82,6 +113,7 @@ proxy.example.com:443 {
 
 ```sh
 ./proxyctl links                    # owner 的 4 个私密资源链接
+./proxyctl menu                     # 中文交互菜单；TTY 下无参数也可打开
 ./proxyctl user add alice           # 创建朋友并在运行时重启 Xray
 ./proxyctl links --user alice
 ./proxyctl user revoke alice        # 删除订阅与 UUID，并重启 Xray
@@ -95,7 +127,7 @@ proxy.example.com:443 {
 
 owner 永久保留。用户名仅允许 `[a-z][a-z0-9_-]{0,31}`。用户变更将整组订阅、私有状态和 Xray 配置重新生成；manager 不挂载 docker.sock，只有 shell 包装器显式重启正在运行的 Xray。直接执行 manager 的 `user` 命令后，管理员必须执行 `docker compose restart xray`。重启前，旧内核仍可能接受已撤销 UUID 的新连接，既有隧道也可能继续；重启会中断所有用户的现有隧道。若重启失败，应立即重试并确认状态，不能把生成配置成功当作内核已应用。
 
-订阅地址是持有即可使用的秘密。`init`、刷新日志、status 不显示 UUID/token，只有主动执行 `links` 才展示链接；不要提交、截图公开或交给第三方二维码站。通过 HTTPS 提供的节点订阅必然包含对应用户 UUID。
+订阅地址是持有即可使用的秘密。`init`、刷新日志、status 不显示 UUID/token；安装器、主动执行 `links` 和菜单的订阅选项会向操作者展示链接，请勿记录进普通日志、提交、截图公开或交给第三方二维码站。通过 HTTPS 提供的节点订阅必然包含对应用户 UUID。
 
 ## 发布、规则与数据
 
@@ -125,9 +157,9 @@ Mihomo 使用本服务器上的分组 classical rule-provider；QX 使用相同�
 ## 测试与验收
 
 ```sh
-docker build -t proxy-stack-tool:0.1.0 -f manager/Dockerfile .
+docker build -t proxy-stack-tool:0.1.1 -f manager/Dockerfile .
 docker run --rm --entrypoint python -v "$PWD/tests:/tests:ro" \
-  proxy-stack-tool:0.1.0 -m unittest discover -s /tests -v
+  proxy-stack-tool:0.1.1 -m unittest discover -s /tests -v
 DOMAIN=proxy.example.com docker compose config --quiet
 DOMAIN=proxy.example.com docker compose -f compose.yaml -f compose.external.yaml config --quiet
 # Linux（rootful Docker）：
@@ -141,10 +173,10 @@ Linux 集成测试要求通过 `sudo` 使用 rootful Docker：临时 bind mount 
 
 `verify` 检查真实 HTTP 响应、系统信任链、全部 owner 资源的哈希/MIME/GET/HEAD、未知 token 和目录拒绝。内部 `--base-url http://…` 明确不验证 TLS；verify 不验证 VLESS 出站或你的客户端所在网络。实际客户端还需按 [CLIENTS.md](docs/CLIENTS.md) 完成导入、规则刷新与出口检查。QX 无公开完整解析器，不能用这些测试替代 iOS。
 
-CI 在 push/PR 测试；release 工作流仅在 `v0.1.0` tag 或手动运行时以 `GITHUB_TOKEN` 推送 GHCR 多架构镜像，标签为 `0.1.0` 与 `sha-<完整提交>`，带 source/version/revision 标签。发布由仓库所有者执行；工作流推送镜像不保证包已经公开，GHCR 可见性需由所有者在 GitHub UI/API 单独确认或设置。实际可拉取性以发布结果及包权限为准。
+CI 在 push/PR 测试；release 工作流仅在 `v0.1.1` tag 或手动运行时以 `GITHUB_TOKEN` 推送 GHCR 多架构镜像，标签为 `0.1.1` 与 `sha-<完整提交>`，带 source/version/revision 标签。发布由仓库所有者执行；工作流推送镜像不保证包已经公开，GHCR 可见性需由所有者在 GitHub 包设置页面单独确认或设置。实际可拉取性以发布结果及包权限为准。
 
 ## 备份与回退
 
-对 `data/model`、`data/runtime`、`data/cache` 做访问受限的加密备份，必要时也备份 Caddy 命名卷证书。公共订阅同样包含秘密，不能上传公开存储。记录使用的镜像 tag/digest；回退代码/镜像前先停 updater、核对 schema=1，恢复同一时点的模型/配置/缓存，使用原 `.env` 重新初始化并验证，再显式启动服务。v0.1.0 不提供自动跨版本迁移或旧 revision 选择命令。
+对 `data/model`、`data/runtime`、`data/cache` 做访问受限的加密备份，必要时也备份 Caddy 命名卷证书。公共订阅同样包含秘密，不能上传公开存储。记录使用的镜像 tag/digest；回退代码/镜像前先停 updater、核对 schema=1，恢复同一时点的模型/配置/缓存，使用原 `.env` 重新初始化并验证，再显式启动服务。v0.1.1 不提供自动跨版本迁移或旧 revision 选择命令。
 
 `down` 不删除数据或证书卷。已有 Caddy 的反代片段由管理员按原有配置所有权手动移除；工具不改共享入口或其他项目。完整删除属于人工运维操作，应先备份并确认路径和卷名。
