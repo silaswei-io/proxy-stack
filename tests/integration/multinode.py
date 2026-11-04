@@ -28,6 +28,10 @@ def multinode_integration(root, network, containers):
     data = [directory / ('data' + str(i)) for i in range(3)]
     for path in data:
         path.mkdir()
+    # Create bind-mount sources explicitly: rootful Linux Docker otherwise
+    # creates cert0 during node initialization, before gateway setup below.
+    for i in range(3):
+        (directory / ('cert' + str(i))).mkdir()
     prefix = network + '-mn-'
     api, gateways, runtimes = prefix + 'api', [], []
 
@@ -64,7 +68,6 @@ def multinode_integration(root, network, containers):
            '-v', f'{data[0]}:/data', TOOL, 'hub-api')
     for i in range(3):
         certs = directory / ('cert' + str(i))
-        certs.mkdir()
         if i:
             shutil.copytree(directory / 'cert0/caddy/pki', certs / 'caddy/pki')
         production = (data[i] / 'runtime/caddy/Caddyfile').read_text()
