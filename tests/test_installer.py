@@ -382,7 +382,7 @@ class InstallerTests(unittest.TestCase):
         self.assertIn('HTTPS 已验证', result.stdout)
         self.assertNotIn('/sub/', result.stdout + result.stderr)
         self.assertNotIn('fake Docker', result.stdout + result.stderr)
-        log_path = Path(result.stdout.split('安装日志/恢复记录：')[1].strip()) / 'operator.log'
+        log_path = Path(result.stdout.split('安装日志/恢复记录：', 1)[1].splitlines()[0].strip()) / 'operator.log'
         # Transaction journals intentionally retain recovery evidence.
         self.assertEqual(log_path.stat().st_mode & 0o777, 0o600)
         self.assertIn('fake Docker pull progress', log_path.read_text())
