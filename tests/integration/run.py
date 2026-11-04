@@ -3,6 +3,8 @@
 
 No GitHub access or real deployment inputs are needed. Existing containers are not
 touched. The tool image must first be built as proxy-stack-tool:0.1.0.
+On Linux with rootful Docker, run with sudo: both the bind-mount ownership and
+host Python's access to generated root-owned 0700 directories require root.
 """
 import base64
 import hashlib
@@ -14,6 +16,7 @@ import socket
 import ssl
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -81,6 +84,14 @@ def tunnel(port, context, state, user, origin_ip):
 
 
 def main():
+    if sys.platform.startswith("linux") and os.geteuid() != 0:
+        raise SystemExit(
+            "Linux integration requires root with a rootful Docker daemon.\n"
+            "Run: sudo python3 tests/integration/run.py\n"
+            "Temporary bind mounts must be root-owned for the manager with cap_drop ALL, "
+            "and host Python must read generated root-owned 0700 model directories. "
+            "Production capability isolation is unchanged."
+        )
     environment = dict(os.environ, DOMAIN="proxy.example.com", MODE="standalone")
     for external in (False, True):
         command = ["docker", "compose", "--env-file", ".env.example", "--profile", "tools", "-f", "compose.yaml"]

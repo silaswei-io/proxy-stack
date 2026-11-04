@@ -130,10 +130,14 @@ docker run --rm --entrypoint python -v "$PWD/tests:/tests:ro" \
   proxy-stack-tool:0.1.0 -m unittest discover -s /tests -v
 DOMAIN=proxy.example.com docker compose config --quiet
 DOMAIN=proxy.example.com docker compose -f compose.yaml -f compose.external.yaml config --quiet
-python3 tests/integration/run.py
+# Linux（rootful Docker）：
+sudo python3 tests/integration/run.py
+# macOS Docker Desktop 则使用：python3 tests/integration/run.py
 ```
 
 离线单元测试不访问 GitHub、不需要真实秘密。集成测试使用实际 Docker 镜像、临时目录和独立 bridge 网络，自动清理，只绑定回环随机高端口；验证 Mihomo/Xray/Caddy 原生配置、订阅路由、可信测试 CA 的 TLS、真实 WS/VLESS TCP 出站，以及撤销后链接和 UUID 失效。初次可能需从公共 registry 拉取固定镜像，不使用生产域名或公网 ACME。Xray 默认阻止私有出站地址；集成测试只在另一份临时配置中精确放行模拟目标 IP 的 TCP 8000 端口，生成的生产配置不变。集成脚本需要宿主机 Python ≥ 3.9 和 Docker，不依赖宿主机 PyYAML。
+
+Linux 集成测试要求通过 `sudo` 使用 rootful Docker：临时 bind mount 目录需由 root 创建，才能保持 manager 的 `cap_drop: ALL` 并执行目录权限操作；宿主机 Python 还需读取容器生成的 root 所有、0700 的模型目录。仅把 data 改成 0777 不能解决这两处权限问题。CI 与 release 的集成步骤均以 sudo 运行，以对应生产 Compose 自动创建的 root 所有挂载；不增加生产容器 capability、不放宽私有目录权限。macOS Docker Desktop 的文件共享行为不同，使用普通用户运行即可。
 
 `verify` 检查真实 HTTP 响应、系统信任链、全部 owner 资源的哈希/MIME/GET/HEAD、未知 token 和目录拒绝。内部 `--base-url http://…` 明确不验证 TLS；verify 不验证 VLESS 出站或你的客户端所在网络。实际客户端还需按 [CLIENTS.md](docs/CLIENTS.md) 完成导入、规则刷新与出口检查。QX 无公开完整解析器，不能用这些测试替代 iOS。
 

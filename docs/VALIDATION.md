@@ -26,6 +26,8 @@
 
 复现命令见 [README](../README.md#测试与验收)。
 
+Linux amd64 CI 曾在 init 阶段出现 `PermissionError`：非 root runner 创建的临时挂载属于 UID 1001，移除全部 capability 的容器 root 不能修改其权限；宿主机 Python 也不能读取随后生成的 root 所有 0700 模型目录。macOS 文件共享掩盖了这一差异。CI/release 的集成命令已改为 `sudo python3 tests/integration/run.py`，脚本在 Linux 非 root 启动时提前解释要求；生产 capability 和目录权限保持不变。Linux CI 修正后的结果待父级重新运行确认。
+
 ## 尚未验证
 
 - iOS QX 原生节点/完整配置导入、实际设备上的规则刷新和匹配。结构校验和服务端连通均不能替代设备验收。

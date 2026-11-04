@@ -18,4 +18,4 @@ jobs:
           docker compose config --quiet
           docker compose -f compose.yaml -f compose.external.yaml config --quiet
       - name: Native configuration, HTTP, TLS and VLESS integration
-        run: python3 tests/integration/run.py
+        run: sudo python3 tests/integration/run.py
