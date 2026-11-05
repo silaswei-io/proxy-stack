@@ -416,6 +416,9 @@ class InstallerTests(unittest.TestCase):
         hub = Hub(store)
         generation = hub.exchange('poll', {'generation': 0}, local=True)['generation']
         hub.exchange('ack', {'generation': generation}, local=True)
+        state = store.state()
+        origin = store.settings(state).origin
+        token = state['users']['owner']['token']
         before = {str(p.relative_to(self.destination)): p.read_bytes()
                   for p in self.destination.rglob('*') if p.is_file()}
         self.env['FAKE_HTTPS_READY'] = '1'
@@ -423,8 +426,14 @@ class InstallerTests(unittest.TestCase):
         result = self.install()
         self.assert_ok(result)
         self.assertIn('订阅就绪', result.stdout)
-        self.assertEqual(result.stdout.count('https://'), 1)
-        self.assertRegex(result.stdout, r'https://[^\s]+/[0-9a-f]{48}/clash')
+        expected_links = [label + '（私密）：' + origin + '/' + token + '/' + suffix for label, suffix in (
+            ('Mihomo / Clash Meta', 'clash'),
+            ('Quantumult X 完整配置（配置文件导入）', 'quantumult-x'),
+            ('Quantumult X 节点（server_remote）', 'quantumult-x/nodes'),
+            ('Quantumult X 受管规则（filter_remote；需完整配置的 VPS 策略）', 'quantumult-x/rules'),
+            ('Quantumult X 独立规则（filter_remote；内置 proxy/direct）', 'quantumult-x/rules-portable'),
+        )]
+        self.assertEqual([line for line in result.stdout.splitlines() if 'https://' in line], expected_links)
         after = {str(p.relative_to(self.destination)): p.read_bytes()
                  for p in self.destination.rglob('*') if p.is_file()}
         self.assertEqual({k:v for k,v in before.items() if k != 'data/model/heartbeats.json'},
