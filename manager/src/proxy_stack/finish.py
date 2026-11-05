@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .cli import NoRedirect
 from .storage import Store
-from .routes import asset_paths
+from .routes import asset_paths, labelled_paths
 
 
 ATTEMPT_SECONDS = 4
@@ -85,10 +85,12 @@ def snapshot(store):
         result['local_required'] = bool(settings.local_node and local.get('enabled'))
         result['local_ready'] = bool(local.get('ready') and local.get('acked') == local.get('desired')
                                      and 0 <= now - beats.get('local', 0) < settings.lease_seconds)
-        path, name, _ = asset_paths(state['users']['owner']['token'])[0]
+        paths = asset_paths(state['users']['owner']['token'])
+        path, name, _ = paths[0]
         manifest = store.read(store.current() / 'manifest.json')
         result.update(url=settings.origin + path, expected=manifest['files'][name],
-                      rules=manifest['quality'])
+                      rules=manifest['quality'],
+                      links=[(label, settings.origin + p) for label, p in labelled_paths(state['users']['owner']['token'])])
         return result
 
 
@@ -143,11 +145,12 @@ def probe(root, pipe):
         after = snapshot(store)
         # A concurrent publication/revocation must not endorse the old response.
         matched = after.get('url') == before['url'] and after.get('expected') == before['expected']
-        result = {k: v for k, v in after.items() if k not in ('url', 'expected')}
+        result = {k: v for k, v in after.items() if k not in ('url', 'expected', 'links')}
         result.update(phase='https', https=matched, ready=matched and after['nodes'] > 0,
                       reason='node' if matched else 'state')
         if result['ready']:
             result['url'] = after['url']
+            result['links'] = after['links']
         pipe.send(result)
     except Exception as error:
         # Never serialize raw exceptions: HTTP errors may contain private paths.
@@ -244,8 +247,8 @@ def finish(store, wait=0, command='./proxyctl', https_only=False, silent=False, 
         nodes = result.get('nodes', 0)
         if result['ready']:
             print(f'订阅就绪：HTTPS 内容已校验；已确认节点 {nodes}。')
-            print('Mihomo（私密）：' + result['url'])
-            print('Quantumult X / 其他链接：菜单「我的订阅」。')
+            for label, url in result['links']:
+                print(label + '（私密）：' + url)
         else:
             https = '已验证' if result.get('https') else '待验证'
             node = f'已确认 {nodes}' if nodes else '等待就绪节点回执'

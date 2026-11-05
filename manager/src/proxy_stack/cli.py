@@ -14,7 +14,7 @@ from . import __version__
 from .model import Settings, default_node_name, username
 from .rules import download
 from .storage import Store
-from .routes import asset_paths
+from .routes import asset_paths, labelled_paths
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -110,7 +110,7 @@ def main(argv=None):
     sub.add_parser("init")
     links = sub.add_parser("links")
     links.add_argument("--user", default="owner", type=username)
-    links.add_argument("--labelled", action="store_true", help="label the four private resource URLs")
+    links.add_argument("--labelled", action="store_true", help="label the private subscription and rule resource URLs")
     finish_parser = sub.add_parser("finish", help="bounded HTTPS/subscription and node readiness check")
     finish_parser.add_argument("--wait", type=int, choices=range(0, 121), default=0, metavar="0..120")
     finish_parser.add_argument("--https-only", action="store_true", help=argparse.SUPPRESS)
@@ -248,10 +248,7 @@ def main(argv=None):
                         raise ValueError("subscription links belong to the hub: " + hub_origin)
                     if args.user not in state["users"]:
                         raise ValueError("unknown user")
-                    paths = asset_paths(state["users"][args.user]["token"])
-                    labels = ("Mihomo / Clash Meta", "Quantumult X 完整配置（iOS 待验证）",
-                              "Quantumult X 节点", "Quantumult X 规则")
-                    for label, (path, _, _) in zip(labels, paths):
+                    for label, path in labelled_paths(state["users"][args.user]["token"]):
                         print((label + ": " if args.labelled else "") + store.settings(state).origin + path)
                 else:
                     result = store.health()

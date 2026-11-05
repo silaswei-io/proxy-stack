@@ -12,7 +12,7 @@ docker run --pull=always --rm ghcr.io/silaswei-io/proxy-stack:v1.0.0 installer |
 
 向导逐行选择「中心 + 本机节点」（默认）、「仅订阅中心」或「加入已有中心」。地址默认探测到的公网 IP，名称默认 hostname，均可回车接受；公共 HTTPS 端口默认选取 **20000–59999 的空闲随机端口**，也可自行输入。`--port 52789` 指定端口（1–65535，80 留给 HTTP-01）。安装前及激活前都会重新检查占用；生成的订阅 URL、订阅内的规则资源 URL 和节点连接端点都使用实际所选端口（标准 HTTPS 443 的 URL 可省略端口），重复运行保留已选端口。
 
-安装器在公共 nonce 回环检查前，以及正常安装或 `--prepare-only` 成功收尾时，都会提示实际所选端口：请在**云安全组和宿主防火墙**放行 **TCP 80（证书签发/续期）**及**所选 TCP HTTPS 端口（订阅/代理）**；使用 NAT 时还需配置端口映射。无变更的 `--prepare-only` 重跑也会提醒。工具不会自动开放防火墙。
+安装器在公共 nonce 回环检查前，以及正常安装或 `--prepare-only` 成功收尾时，都会提示实际所选端口：请在**云控制台防火墙/安全组添加入站规则，并在宿主防火墙放行 TCP 80（证书签发/续期）及所选 TCP HTTPS 端口（订阅/代理）**；使用 NAT 时还需将这两个公网端口映射到本机同号端口。交互安装和交互 `--check` 会暂停，输入 `y` 确认已放行后才检查；失败可在当前端口调整规则，输入 `r` 重试一次，无需重新随机选端口。其他输入取消，仍保留原安装和宿主配置。`--non-interactive` 只提示、不等待、不自动重试，请提前放行显式 `--port`，或根据失败提示配置后重跑。`--prepare-only` 不做连通性检查，也不要求此确认；无变更的准备重跑仍会提醒。工具不会自动开放防火墙。后续涉及宿主路由或受管重配的计划确认仍单独保留。
 
 普通安装和 `--check` 会在写入安装/宿主配置前，用临时 nonce HTTP 监听器及另一个 bridge 容器，对**所选空闲 HTTPS 端口**做公共地址回环检查（启动命令最多 10 秒、探测命令最多 15 秒、清理命令最多 5 秒）。两个容器还各自以 Linux SIGALRM 强制截止：监听器 30 秒、客户端 12 秒，覆盖慢速请求头、DNS 和慢速读取；请求空闲超时仍为 2 秒，退出/中断时仍清理两个容器。显式和随机端口都检查；失败提示检查防火墙、云安全组、NAT/回环支持，不搜索其他可穿透防火墙的端口。**回环通过不证明真正外部入站可达**，部分网络也可能只因不支持 NAT 回环而失败。精确确认已有受管 Caddy 占用该绑定时跳过临时监听，后续 HTTPS 完成验证仍必需；`--prepare-only` 跳过回环。
 
@@ -67,14 +67,14 @@ docker run --rm ghcr.io/silaswei-io/proxy-stack:v1.0.0 installer | bash -s -- \
 /opt/proxy-stack/proxyctl menu         # 重试完成检查；我的订阅查看 Quantumult X 等链接
 ```
 
-`finish` 仅在公共 HTTPS 返回本中心内容、至少一个已确认当前配置且租约有效的节点时显示一个 Mihomo 主 URL；仅中心需要远程就绪节点。检查始终验证 TLS，不跟随重定向、不使用环境代理，网络等待不持有状态锁。节点检查自身 HTTPS/WSS 和运行/同步，不检查订阅。它不代表真实客户端导入或代理出站验收，也不能保证云防火墙、NAT、公共 ACME 签发和持续续期。
+`finish` 仅在公共 HTTPS 返回本中心内容、至少一个已确认当前配置且租约有效的节点时，显示 Mihomo 和 Quantumult X 的五个实际私密 URL（与菜单「我的订阅」一致）；仅中心需要远程就绪节点。检查始终验证 TLS，不跟随重定向、不使用环境代理，网络等待不持有状态锁。节点检查自身 HTTPS/WSS 和运行/同步，不检查订阅。它不代表真实客户端导入或代理出站验收，也不能保证云防火墙、NAT、公共 ACME 签发和持续续期。
 
 ## 管理
 
 ```sh
 ./proxyctl menu                     # 中文菜单；终端中无参数也可打开
-./proxyctl finish                   # 检查完成条件；成功才显示一个主订阅 URL
-./proxyctl links --labelled         # 显式披露 owner 四个私密 URL，不检查就绪
+./proxyctl finish                   # 检查完成条件；成功才显示 Mihomo / Quantumult X 链接
+./proxyctl links --labelled         # 显式披露 owner 五个私密 URL，不检查就绪
 ./proxyctl user add alice           # 独立 UUID/token，下发所有节点
 ./proxyctl links --user alice
 ./proxyctl user revoke alice        # 立即移除订阅，等待各节点应用回执
@@ -91,7 +91,9 @@ docker run --rm ghcr.io/silaswei-io/proxy-stack:v1.0.0 installer | bash -s -- \
 ./proxyctl down                     # 保留数据与证书，不接受删除参数
 ```
 
-订阅使用不带扩展名的私密地址：`https://host/<48hex-token>/clash`、`/<48hex-token>/quantumult-x`（完整配置）、`/<48hex-token>/quantumult-x/nodes`、`/<48hex-token>/quantumult-x/rules`。Mihomo 规则资源为 `/<48hex-token>/rules/<name>`。token 保持原有 48 位十六进制熵；旧 `/sub/<token>/clash.yaml`、`/sub/<token>/qx/...` 和规则地址继续可用。Caddy 仅对精确 GET/HEAD 做内部映射，不跳转、不接受查询参数；底层文件和 manifest 路径保持兼容。
+订阅使用不带扩展名的私密地址：`https://host/<48hex-token>/clash`、`/<48hex-token>/quantumult-x`（完整配置）、`/<48hex-token>/quantumult-x/nodes`、`/<48hex-token>/quantumult-x/rules`（受管规则）、`/<48hex-token>/quantumult-x/rules-portable`（独立规则）。Mihomo 规则资源为 `/<48hex-token>/rules/<name>`。token 保持原有 48 位十六进制熵；旧 `/sub/<token>/clash.yaml`、`/sub/<token>/qx/...` 和规则地址继续可用。Caddy 仅对精确 GET/HEAD 做内部映射，不跳转、不接受查询参数；底层文件和 manifest 路径保持兼容。
+
+Quantumult X 的 `quantumult-x` 链接应按**完整配置文件**导入，其中已配置 `VPS` 策略组、节点和规则资源。保留自己的配置时，将 `quantumult-x/nodes` 放入 `[server_remote]`，将 `quantumult-x/rules-portable` 放入 `[filter_remote]`；独立规则仅使用内置 `proxy/direct`，无需自建 `VPS` 组，代理节点由客户端选择。原 `quantumult-x/rules` 及旧 `qx/rules.list` 保留 `direct/VPS`，仍供完整配置的自定义 `VPS` 组使用。两个版本的规则顺序和匹配条件相同；不要设置统一的 `force-policy`，以免覆盖直连分流。`rules/<name>` 是 Mihomo 的 YAML `payload`，不能作为 QX 的 `filter_remote`；完整配置也不能当节点或规则资源导入，否则会产生格式错误。QX 原生 iOS 导入仍待实机验证。
 
 官方项目与镜像命名空间为 `silaswei-io/proxy-stack`，公开版本仍为 `v1.0.0`。旧 `ghcr.io/silaswei/proxy-stack:v1.0.0` 的受管安装可重跑新安装器或运行新版 `proxyctl upgrade`，仅迁移官方镜像默认，保留 UUID、token、WS 路径和其他设置。自定义镜像和其他标签需手动迁移。已有安装要启用新订阅路由，请正常重跑新安装器（不用 `--prepare-only`）；`proxyctl upgrade` 只更新镜像默认与原本运行的服务，保留现有运行配置。安装器的模板更新仍使用原有事务备份/回滚；upgrade 在解析新镜像失败时恢复 `.env`，服务重建失败时可将 TOOL_IMAGE 恢复为旧官方地址后重试。
 

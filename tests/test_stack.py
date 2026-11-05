@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -323,7 +324,7 @@ class RenderTests(unittest.TestCase):
         self.assertFalse(qx.startswith("\ufeff"))
         sections = re.findall(r"^\[([^]]+)\]$", qx, re.M)
         self.assertEqual(len(sections), len(set(sections)))
-        self.assertEqual(sections, ["general", "dns", "policy", "server_remote", "filter_remote", "server_local", "filter_local", "rewrite_remote", "rewrite_local", "task_local", "mitm"])
+        self.assertEqual(sections, ["general", "dns", "policy", "server_remote", "filter_remote", "server_local", "filter_local", "rewrite_remote", "rewrite_local", "task_local", "http_backend", "mitm"])
         self.assertIn("static = VPS, Fixture VPS", qx)
         self.assertIn("final, VPS", qx)
         for path in re.findall(r"https://[^,\s]+", qx):
@@ -339,6 +340,69 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(len(qx_rules), expected_count)
         self.assertIn("host, api.ip.sb, VPS", qx_rules[:4])
 
+    def test_qx_native_resources_match_import_sections_and_policy_targets(self):
+        settings = replace(self.settings, port=34567)
+        state = copy.deepcopy(self.state)
+        state['nodes']['local']['settings']['port'] = settings.port
+        cache = rules.bootstrap()
+        cache['lists']['private'] += ['*.goo?le.com', '2001:db8::/32']
+        files = render.public_files(settings, state, cache)
+        config = files[self.base + 'qx/full.conf']
+        sections = dict(re.findall(r'^\[([^]]+)\]\n(.*?)(?=^\[|\Z)', config, re.M | re.S))
+        paths = asset_paths('a' * 48)
+        for section, index in (('server_remote', 2), ('filter_remote', 3)):
+            url, _, _ = paths[index]
+            self.assertEqual(sections[section].strip().split(',')[0], settings.origin + url)
+        self.assertNotIn('force-policy=', sections['filter_remote'])  # preserve mixed direct/VPS routing
+        policy = sections['policy'].strip().split('=', 1)[1].split(',')[0].strip()
+        self.assertEqual(policy, 'VPS')
+        self.assertEqual(sections['filter_local'].strip(), 'final, ' + policy)
+        self.assertEqual(config.count('\nfinal, '), 1)
+        self.assertIn('http_backend', sections)
+        nodes = files[self.base + 'qx/nodes.txt']
+        self.assertTrue(nodes.startswith('vless=proxy.example.com:34567,'))
+        self.assertNotIn('[server_local]', nodes)  # server_remote consumes only native node lines
+        native = (FIXTURES / 'qx-official-filter.snippet').read_text()
+        official = (FIXTURES / 'qx-official-sample.conf').read_text()
+        kinds = set()
+        filters = files[self.base + 'qx/rules.list']
+        self.assertNotIn('payload:', filters)  # Mihomo YAML is not a Quantumult X filter resource
+        self.assertNotIn('[filter_local]', filters)
+        for line in filters.splitlines():
+            kind, value, target = [part.strip() for part in line.split(',')]
+            self.assertIn(target, {'direct', policy})
+            self.assertIn(kind, {'host', 'host-suffix', 'host-wildcard', 'ip-cidr', 'ip6-cidr'})
+            kinds.add(kind)
+            if kind in ('ip-cidr', 'ip6-cidr'):
+                self.assertEqual(ipaddress.ip_network(value).version, 4 if kind == 'ip-cidr' else 6)
+            else:
+                self.assertRegex(value, r'^[a-z0-9_*?.-]+$')
+        self.assertEqual(kinds, {'host', 'host-suffix', 'host-wildcard', 'ip-cidr', 'ip6-cidr'})
+        for kind in ('host-suffix', 'ip-cidr'):
+            self.assertIn(kind + ', ', native)
+        for kind in ('host-wildcard', 'ip6-cidr'):
+            self.assertIn(kind + ', ', official)
+        for _, group in groups(settings, cache['lists'], [settings]):
+            for rule in group:
+                expected_kind = {'exact': 'host', 'suffix': 'host-suffix', 'wildcard': 'host-wildcard',
+                                 'ip4': 'ip-cidr', 'ip6': 'ip6-cidr'}[rule.kind]
+                target = 'direct' if rule.policy == 'DIRECT' else policy
+                self.assertIn(f'{expected_kind}, {rule.value}, {target}', filters.splitlines())
+        portable = files[self.base + 'qx/rules-portable.list'].splitlines()
+        managed = filters.splitlines()
+        self.assertEqual(len(portable), len(managed))
+        self.assertEqual({row.rsplit(', ', 1)[1] for row in portable}, {'proxy', 'direct'})
+        # Identical first-match order and match expressions; only the policy column changes.
+        self.assertEqual([row.rsplit(', ', 1)[0] for row in portable],
+                         [row.rsplit(', ', 1)[0] for row in managed])
+        for standalone, full in zip(portable, managed):
+            self.assertEqual(standalone.rsplit(', ', 1)[1],
+                             'proxy' if full.rsplit(', ', 1)[1] == policy else 'direct')
+        self.assertTrue(portable[0].endswith(', proxy'))
+        self.assertNotIn('final,', '\n'.join(portable))
+        self.assertNotIn('rules-portable', sections['filter_remote'])
+        self.assertNotIn('force-policy=', config)
+
     def test_asset_allowlist_and_golden_output_hashes(self):
         pattern = re.compile(render.ASSET_PATTERN)
         for path in self.files:
@@ -351,6 +415,8 @@ class RenderTests(unittest.TestCase):
             self.assertIsNotNone(public.fullmatch(path))
             self.assertIsNotNone(public.fullmatch("/" + name))
             self.assertIn(name, self.files)
+        self.assertIn(('/' + 'a' * 48 + '/quantumult-x/rules-portable',
+                       self.base + 'qx/rules-portable.list', 'text/plain'), asset_paths('a' * 48))
         for suffix in ("", "clash.yaml", "quantumult-x/full.conf", "rules/unknown", "rules/proxy.yaml",
                        "clash/", "quantumult-x/../clash", "clash?extra=1"):
             self.assertIsNone(public.fullmatch("/" + "a" * 48 + "/" + suffix))

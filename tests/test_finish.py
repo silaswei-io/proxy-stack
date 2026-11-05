@@ -17,6 +17,7 @@ from proxy_stack import finish
 from proxy_stack.cli import main
 from proxy_stack.control import Hub
 from proxy_stack.model import Settings
+from proxy_stack.routes import labelled_paths
 from proxy_stack.storage import Store, atomic_file
 
 
@@ -61,14 +62,31 @@ class FinishTests(unittest.TestCase):
             self.assertNotIn(secret, output)
 
     def test_verified_own_asset_and_ack_happy_path(self):
+        self.store = Store(self.store.root.parent / 'custom-port')
+        self.store.init(Settings('proxy.example.com', 'Test', port=34567))
         self.ack()
         code, output = self.run_finish()
         self.assertEqual(code, 0, output)
         self.assertIn('订阅就绪：HTTPS 内容已校验；已确认节点 1', output)
         self.assertIn(self.store.state()['users']['owner']['token'], output)
-        self.assertEqual(output.count('https://'), 1)
-        self.assertIn('Quantumult X / 其他链接', output)
-        self.assertLessEqual(len(output.splitlines()), 7)
+        self.assertEqual(output.count('https://'), 5)
+        token = self.store.state()['users']['owner']['token']
+        menu = io.StringIO()
+        with patch.dict(os.environ, PROXY_STACK_DATA=str(self.store.root)), contextlib.redirect_stdout(menu):
+            self.assertEqual(main(['links', '--labelled']), 0)
+        for label, path in labelled_paths(token):
+            url = 'https://proxy.example.com:34567' + path
+            self.assertIn(label + '（私密）：' + url, output)
+            self.assertIn(label + ': ' + url, menu.getvalue())
+        self.assertIn('server_remote', output)
+        self.assertIn('filter_remote；需完整配置的 VPS 策略', output)
+        self.assertIn('filter_remote；内置 proxy/direct', output)
+        self.assertIn(f'https://proxy.example.com:34567/{token}/quantumult-x/rules-portable', output)
+        self.assertLessEqual(len(output.splitlines()), 10)
+        silent = io.StringIO()
+        with contextlib.redirect_stdout(silent):
+            self.assertEqual(finish.finish(self.store, silent=True), 0)
+        self.assertEqual(silent.getvalue(), '')
 
     def test_failed_tls_offline_wrong_identity_and_headers_never_disclose(self):
         self.ack()

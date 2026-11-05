@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from proxy_stack.cli import main, verify
 from proxy_stack.model import Settings
-from proxy_stack.routes import asset_paths
+from proxy_stack.routes import asset_paths, labelled_paths
 from proxy_stack.storage import Store
 
 
@@ -51,6 +51,9 @@ class VerifyRoutesTests(unittest.TestCase):
             for alias in (clean, '/' + name):
                 for method in ('GET', 'HEAD'):
                     self.assertIn((alias, method), self.calls)
+        portable = ('/' + self.token + '/quantumult-x/rules-portable',
+                    'sub/' + self.token + '/qx/rules-portable.list', 'text/plain')
+        self.assertIn(portable, self.paths)
         config = json.loads((self.store.current() / self.paths[0][1]).read_text())
         for resource in config['rule-providers'].values():
             self.assertIn((resource['url'].removeprefix('https://proxy.example.com'), 'GET'), self.calls)
@@ -78,8 +81,10 @@ class VerifyRoutesTests(unittest.TestCase):
         with patch.dict(os.environ, PROXY_STACK_DATA=str(self.store.root)), redirect_stdout(output):
             self.assertEqual(main(['links', '--labelled']), 0)
         text = output.getvalue()
-        self.assertEqual(text.count('Quantumult X'), 3)
+        self.assertEqual(text.count('Quantumult X'), 4)
         self.assertNotIn('/sub/', text)
-        for clean, _, _ in self.paths[:4]:
+        for label, clean in labelled_paths(self.token):
             self.assertIn('https://proxy.example.com' + clean, text)
+            self.assertIn(label + ': ', text)
+        self.assertEqual(len(labelled_paths(self.token)), 5)
         self.assertEqual(self.store.state()['users'], before)

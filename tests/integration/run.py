@@ -403,6 +403,14 @@ def main():
                         urls = [provider['url'] for provider in config['rule-providers'].values()]
                     elif clean.endswith('/quantumult-x'):
                         urls = re.findall(r'https://[^,\s]+', body.decode())
+                        assert any(url.endswith('/quantumult-x/rules') for url in urls)
+                        assert not any(url.endswith('/rules-portable') for url in urls)
+                    elif clean.endswith('/quantumult-x/rules-portable'):
+                        assert {row.rsplit(', ', 1)[1] for row in body.decode().splitlines()} == {'direct', 'proxy'}
+                        managed = request('/' + token + '/quantumult-x/rules', tls=tls)[2].decode().splitlines()
+                        portable = body.decode().splitlines()
+                        assert [row.rsplit(', ', 1)[0] for row in portable] == [row.rsplit(', ', 1)[0] for row in managed]
+                        urls = []
                     else:
                         urls = []
                     for url in urls:

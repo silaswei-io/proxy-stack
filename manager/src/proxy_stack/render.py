@@ -123,6 +123,8 @@ def public_files(settings, state, cache):
     files = {}
     providers = {name: encoded({"payload": [r.clash() + (",no-resolve" if name == "bootstrap" and r.kind in ("ip4", "ip6") else "") for r in rules]}) for name, rules in routing}
     qx_rules = "\n".join(r.qx().replace(", DIRECT", ", direct") for _, rules in routing for r in rules) + "\n"
+    qx_portable = "\n".join(r.qx().rsplit(", ", 1)[0] + (", proxy" if r.policy == POLICY else ", direct")
+                            for _, rules in routing for r in rules) + "\n"
     for user in state["users"].values():
         base = "sub/" + user["token"] + "/"
         def url(suffix):
@@ -155,6 +157,7 @@ def public_files(settings, state, cache):
             files[base + "rules/" + name + ".yaml"] = content
         files[base + "qx/nodes.txt"] = "".join(qx_nodes)
         files[base + "qx/rules.list"] = qx_rules
+        files[base + "qx/rules-portable.list"] = qx_portable
         files[base + "qx/full.conf"] = f"""# proxy-stack v1.0.0; Quantumult X native iOS import remains UNVERIFIED.
 # Rules: {cache['quality']}; URLs below are private credentials.
 # No ready nodes means normally proxied traffic is REJECTED.
@@ -186,6 +189,8 @@ final, {POLICY}
 [rewrite_local]
 
 [task_local]
+
+[http_backend]
 
 [mitm]
 """

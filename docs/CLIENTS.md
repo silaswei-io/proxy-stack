@@ -9,7 +9,8 @@
 ## Quantumult X — iOS 原生验收待完成
 
 - `/<token>/quantumult-x/nodes`：导入“服务器资源”，是原生 `vless=… method=none … obfs=wss` 行，不需要第三方 resource parser。
-- `/<token>/quantumult-x/rules`：导入“分流资源”，依赖名为 VPS 的策略；不能用 force-policy 把所有行覆盖为一个策略。
+- `/<token>/quantumult-x/rules-portable`：独立导入“分流资源”（`filter_remote`），仅使用内置 `proxy/direct`，无需自建 VPS 组；代理节点由客户端选择。不能用 force-policy 把混合规则全部覆盖为一个策略。
+- `/<token>/quantumult-x/rules`：完整配置配套的受管规则，依赖该配置定义的 VPS 策略。保留此链接与旧 `qx/rules.list` 的语义。规则顺序与独立版本一致，仅代理策略名称不同。
 - `/<token>/quantumult-x`：完整配置，含节点资源、规则资源和独立 `VPS` static 策略，包含全部已就绪节点的 tag。完整导入可能替换已有配置，应先备份客户端现有配置。
 
 模板采用官方 [sample.conf](https://github.com/crossutility/Quantumult-X/blob/master/sample.conf) 展示的区段和字段；本仓库 fixtures 仅用于格式回归，不是成功设备样本。没有 iOS 成功基线或承诺的最低 Quantumult X 版本。此前关于无效配置的区段/测速 URL/策略名调整均未得到设备最终反馈，根因未确定。
@@ -32,3 +33,5 @@
 没有就绪节点时，完整 Mihomo/Quantumult X 配置的默认组选择 REJECT/reject，显式国内、LAN、Apple/iCloud 直连规则保留。Quantumult X 节点资源单独导入时，已有客户端策略由用户管理，不会被资源自动替换。加入节点上的 links 命令提示使用中心链接。
 
 以上 token 为原有 48 位十六进制私密 token。旧 `/sub/<token>/clash.yaml`、`/sub/<token>/qx/nodes.txt`、`/sub/<token>/qx/full.conf`、`/sub/<token>/qx/rules.list` 继续兼容；新配置中嵌入的规则和服务器资源均使用新地址。不要公开任何一种链接。
+
+独立规则不能使用 Mihomo 的 `rules/<name>` YAML，也不能将完整配置 URL 当作 `filter_remote`。新增独立资源修正了自定义策略未声明时的导入兼容问题；尚未通过原生 QX 复现或确认用户所报“格式错误”的具体根因。

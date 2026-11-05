@@ -10,7 +10,7 @@ manage_host=false repeat=false host_route=false http_port=80 http_bind=0.0.0.0
 committed=false project= phase=preflight recover_only=false reconfigure=false namespace_change=false
 fail() { printf 'proxy-stack: %s\n' "$*" >&2; exit 1; }
 firewall_notice() {
-  printf '公网放行：云安全组和宿主防火墙需允许 TCP 80（证书签发/续期）及 TCP %s（订阅/代理）；有 NAT 时还需端口映射。工具不会自动开放防火墙。\n' "$1"
+  printf '公网放行：请在云控制台防火墙/安全组添加入站 TCP 80（证书签发/续期）及 TCP %s（订阅/代理），宿主防火墙也需放行；有 NAT 时将这两个公网端口映射到本机同号端口。工具不会自动开放防火墙。\n' "$1"
 }
 usage() {
   printf '%s\n' 'Usage: bash installer.sh [--domain DOMAIN --name NAME --port PORT] [--directory PATH]' \
@@ -327,7 +327,23 @@ domain=$(timeout 15 docker run --rm --read-only --cap-drop=ALL --network none -e
 firewall_notice "$port"
 quiet timeout 20 docker run --rm --read-only --cap-drop=ALL --network bridge -e "DOMAIN=$domain" -e "NODE_NAME=$node_name" "$tool_image" check-address || fail '地址映射预检失败；安装目录未写入。'
 if port_available "$port"; then
-  if ! $prepare_only; then public_roundtrip || fail "所选 HTTPS 端口 $port 的公共地址回环失败；检查防火墙/云安全组、NAT/回环支持。原安装和宿主配置未改变。日志：$operator_log"; fi
+  if ! $prepare_only; then
+    if ! $non_interactive; then
+      prompt firewall "请先放行 TCP 80 和 TCP $port；确认已配置后输入 y 开始连通性检查，其他输入取消：[y/N]: "
+      case "$reply" in y|Y) ;; *) fail '已取消；原安装和宿主配置未改变。' ;; esac
+    fi
+    if public_roundtrip; then :
+    else
+      if ! $non_interactive; then
+        printf 'TCP %s 回环未通过；请检查云防火墙/安全组、宿主防火墙和 NAT/回环支持。\n' "$port"
+        prompt firewall-retry "可保持当前端口 $port 调整放行规则；输入 r 重试一次，其他输入退出：[r/N]: "
+        case "$reply" in r|R) public_roundtrip || fail "所选 HTTPS 端口 $port 的公共地址回环仍失败；原安装和宿主配置未改变。日志：$operator_log" ;;
+          *) fail "所选 HTTPS 端口 $port 的公共地址回环失败；原安装和宿主配置未改变。日志：$operator_log" ;; esac
+      else
+        fail "所选 HTTPS 端口 $port 的公共地址回环失败；检查防火墙/云安全组、NAT/回环支持。原安装和宿主配置未改变。日志：$operator_log"
+      fi
+    fi
+  fi
 elif owns_binding "$port" 0.0.0.0 "$port" || owns_binding "$port" :: "$port"; then
   printf '精确受管 Caddy 已占用所选端口；跳过临时监听，仍须完成 HTTPS 验证。\n'
 else fail "公共 HTTPS 端口 $port 已占用；安装目录未写入。"; fi
