@@ -128,7 +128,9 @@ data/public/current             原子指向已校验的发布目录
 
 私有目录 0700、模型与控制凭据文件 0600。订阅和 Xray 配置同样包含秘密；备份应加密并限制访问。不要公开 URL、UUID、token，也不要上传到第三方二维码站。栈内 Caddy 排除请求 access/error 日志，避免泄漏订阅/WS 私密路径。专家手动反代入口也应避免记录这些路径或请求体。
 
-规则源固定为 [Loyalsoldier/clash-rules](https://github.com/Loyalsoldier/clash-rules) 的 private/apple/icloud/proxy/direct/cncidr/lancidr。首次为 `minimal-bootstrap`，不代表完整国内分流；updater 成功后 `rules=upstream`。下载限时限量，拒绝危险 YAML 与异常缩水，失败保留最后好版本。两客户端共用规则语义：IP 查询域名代理 → 中心/各节点引导直连 → 私网/LAN → Apple/iCloud → 已知代理 → `.cn`/国内域名 → 国内 IP → 默认 VPS。节点和中心地址使用精确域名或 /32、/128 规则。
+规则源固定为 [Loyalsoldier/clash-rules](https://github.com/Loyalsoldier/clash-rules) 的 private/apple/icloud/proxy/direct/cncidr/lancidr。首次为 `minimal-bootstrap`，不代表完整国内分流；updater 成功后 `rules=upstream`。下载限时限量，拒绝危险 YAML 与异常缩水，失败保留最后好版本。两客户端按首尔基线排序：四个 IP 查询域名代理 → 中心/各节点引导直连 → localhost/`.local`/`.lan` → 八条内联私网 IP → private → lancidr → iCloud → Apple → proxy → `.cn` → direct → cncidr → 默认 VPS。节点和中心地址使用本部署的精确域名或 /32、/128 规则，策略名称保留 `VPS`。
+
+Mihomo 完整订阅包含首尔基线的 fake-ip、国内 DoH 引导/节点解析和国内/海外 DNS 分流，中心及节点域名优先国内解析；私网 IP 和 lancidr 为 `no-resolve`，cncidr 保留解析。新完整配置内联关键规则并引用七个源 provider，旧九个资源地址及 classical 格式继续兼容。QX 完整配置内联关键安全规则，受管/独立分流资源保留相同顺序；官方未文档化的 IP `no-resolve` 和 Mihomo DNS 字段不输出到 QX。QX 的 DNS 行为仍需设备验证。升级时刷新或重新导入**完整配置**，仅刷新规则资源不会改变旧缓存的 DNS/顺序。各订阅的导入方式和能力边界见 [CLIENTS.md](docs/CLIENTS.md)。
 
 只提供 TCP VLESS/WSS/TLS，不启用 UDP 或 IPv6 DNS。固定 Xray 默认阻止私有地址代理出站。没有面板、Reality、计费或自动公网运维。本次是全新 v1.0.0，不提供旧版本状态/模板迁移。
 
@@ -144,6 +146,8 @@ DOMAIN=proxy.example.com docker compose config --quiet
 DOMAIN=proxy.example.com docker compose -f compose.yaml -f compose.external.yaml config --quiet
 # 快速 native 预检：真实 Debian Caddy 2.6.2、固定栈 Caddy 和导出安装器 --check。
 python3 tests/integration/preflight.py
+# 首尔路由/DNS 与旧 classical 缓存：Mihomo v1.19.15 原生离线解析。
+python3 tests/integration/routing.py
 # 完整集成（内部也会运行上述 native 预检）；Linux rootful Docker 需 sudo。
 sudo python3 tests/integration/run.py
 ```

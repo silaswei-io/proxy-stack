@@ -1,8 +1,25 @@
 """Pure renderers: never read state or perform network requests."""
 import json
 
-from .model import POLICY, Settings, groups
-from .routes import ASSET_PATTERN, PUBLIC_PATTERN, canonical_path, caddy_rewrites
+from .model import POLICY, SOURCES, Settings, groups
+from .routes import ASSET_PATTERN, PUBLIC_PATTERN, RULE_NAMES, canonical_path, caddy_rewrites
+
+DOMESTIC_DOH = ["https://dns.alidns.com/dns-query", "https://doh.pub/dns-query"]
+OVERSEAS_DOH = ["https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query"]
+
+
+def mihomo_dns(settings, endpoints):
+    addresses = list(dict.fromkeys([settings.domain] + [e.domain for e in endpoints]))
+    # Exact hub/node names must precede source policies, including proxy, so
+    # resolving the subscription and proxy transport cannot recurse via VPS.
+    policy = {endpoint.domain: DOMESTIC_DOH for endpoint in [settings, *endpoints] if not endpoint.ip}
+    policy.update({"rule-set:private,direct,apple,icloud": DOMESTIC_DOH,
+                   "+.cn": DOMESTIC_DOH, "rule-set:proxy": OVERSEAS_DOH})
+    return {"enable": True, "ipv6": False, "enhanced-mode": "fake-ip", "fake-ip-range": "198.18.0.1/16",
+            "fake-ip-filter": ["*.lan", "*.local", "localhost", "+.msftconnecttest.com", "+.msftncsi.com"] + addresses,
+            "default-nameserver": ["223.5.5.5", "119.29.29.29"],
+            "nameserver": DOMESTIC_DOH, "proxy-server-nameserver": DOMESTIC_DOH,
+            "respect-rules": True, "nameserver-policy": policy}
 
 
 def encoded(value):
@@ -121,7 +138,23 @@ def public_files(settings, state, cache):
     available = ready_nodes(settings, state)
     routing = groups(settings, cache["lists"], endpoints)
     files = {}
-    providers = {name: encoded({"payload": [r.clash() + (",no-resolve" if name == "bootstrap" and r.kind in ("ip4", "ip6") else "") for r in rules]}) for name, rules in routing}
+    # Keep all nine existing URLs and their classical payload format for cached
+    # configurations. New full configs use seven source providers plus inline
+    # safety rules; preserve schema/type at existing provider URLs.
+    legacy = dict(routing)
+    legacy["bootstrap"] = legacy["bootstrap"] + legacy["inline-private"]
+    legacy["direct"] = legacy["cn"] + legacy["direct"]
+    providers = {name: encoded({"payload": [r.clash() for r in legacy[name]]}) for name in RULE_NAMES}
+    inline_prefix = [r for name, entries in routing if name in ("force-proxy", "bootstrap", "inline-private") for r in entries]
+    mihomo_rules = []
+    for name, entries in routing:
+        if name in SOURCES:
+            mihomo_rules.append("RULE-SET," + name + "," + (POLICY if name == "proxy" else "DIRECT")
+                                + (",no-resolve" if name == "lancidr" else ""))
+        else:
+            for rule in entries:
+                kind, value, *options = rule.clash().split(",")
+                mihomo_rules.append(",".join([kind, value, rule.policy, *options]))
     qx_rules = "\n".join(r.qx().replace(", DIRECT", ", direct") for _, rules in routing for r in rules) + "\n"
     qx_portable = "\n".join(r.qx().rsplit(", ", 1)[0] + (", proxy" if r.policy == POLICY else ", direct")
                             for _, rules in routing for r in rules) + "\n"
@@ -143,15 +176,11 @@ def public_files(settings, state, cache):
                             f"obfs-uri={path}, tls-verification=true, fast-open=false, udp-relay=false, tag={endpoint.node_name}\n")
         names = [node["name"] for node in nodes]
         clash = {"mixed-port": 7890, "allow-lan": False, "mode": "rule", "log-level": "warning", "ipv6": False,
-                 "dns": {"enable": True, "ipv6": False, "enhanced-mode": "fake-ip", "respect-rules": True,
-                         "default-nameserver": ["223.5.5.5", "119.29.29.29"],
-                         "proxy-server-nameserver": ["223.5.5.5", "119.29.29.29"],
-                         "nameserver": ["223.5.5.5", "119.29.29.29"],
-                         "fake-ip-filter": list(dict.fromkeys([settings.domain] + [e.domain for e in endpoints] + ["*.lan", "*.local"]))},
+                 "dns": mihomo_dns(settings, endpoints),
                  "proxies": nodes, "proxy-groups": [{"name": POLICY, "type": "select", "proxies": names or ["REJECT"]}],
                  "rule-providers": {name: {"type": "http", "behavior": "classical", "format": "yaml", "interval": 86400,
-                                             "url": url("rules/" + name + ".yaml"), "path": "./rules/" + name + ".yaml"} for name, _ in routing},
-                 "rules": ["RULE-SET," + name + "," + rules[0].policy for name, rules in routing] + ["MATCH," + POLICY]}
+                                             "url": url("rules/" + name + ".yaml"), "path": "./rules/" + name + ".yaml"} for name, _ in routing if name in SOURCES},
+                 "rules": mihomo_rules + ["MATCH," + POLICY]}
         files[base + "clash.yaml"] = encoded(clash)
         for name, content in providers.items():
             files[base + "rules/" + name + ".yaml"] = content
@@ -182,6 +211,7 @@ static = {POLICY}, {", ".join(names) if names else "reject"}
 [server_local]
 
 [filter_local]
+{chr(10).join(r.qx().replace(", DIRECT", ", direct") for r in inline_prefix)}
 final, {POLICY}
 
 [rewrite_remote]

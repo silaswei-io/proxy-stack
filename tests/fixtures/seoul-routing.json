@@ -1,0 +1,57 @@
+{
+  "description": "Sanitized Seoul routing/DNS baseline. Endpoint identity is fictional; source samples deliberately overlap to expose precedence. No subscription URLs or credentials.",
+  "host": "hub.example.net",
+  "sources": {
+    "private": ["+.private.example", "+.overlap.example", "*.private-wild.example"],
+    "lancidr": ["169.254.0.0/16", "198.19.0.0/16"],
+    "icloud": ["+.icloud.com", "+.apple-overlap.example"],
+    "apple": ["+.apple.com", "+.apple-overlap.example"],
+    "proxy": ["+.google.com", "+.hub.example.net", "+.local", "+.lan", "+.localhost", "+.private.example", "+.overlap.example", "+.icloud.com", "+.apple.com", "+.apple-overlap.example", "+.forced.cn", "+.shared.example", "*.proxy-wild.example"],
+    "direct": ["+.ip.sb", "+.ipapi.co", "+.ipapi.is", "+.ipwho.is", "+.google.com", "+.shared.example", "+.baidu.com", "+.overlap.example"],
+    "cncidr": ["203.0.113.0/24"]
+  },
+  "rules": [
+    "DOMAIN,api.ip.sb,Proxy",
+    "DOMAIN,ipapi.co,Proxy",
+    "DOMAIN,api.ipapi.is,Proxy",
+    "DOMAIN,ipwho.is,Proxy",
+    "DOMAIN,hub.example.net,DIRECT",
+    "DOMAIN,localhost,DIRECT",
+    "DOMAIN-SUFFIX,local,DIRECT",
+    "DOMAIN-SUFFIX,lan,DIRECT",
+    "IP-CIDR,127.0.0.0/8,DIRECT,no-resolve",
+    "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve",
+    "IP-CIDR,172.16.0.0/12,DIRECT,no-resolve",
+    "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
+    "IP-CIDR,100.64.0.0/10,DIRECT,no-resolve",
+    "IP-CIDR6,::1/128,DIRECT,no-resolve",
+    "IP-CIDR6,fc00::/7,DIRECT,no-resolve",
+    "IP-CIDR6,fe80::/10,DIRECT,no-resolve",
+    "RULE-SET,private,DIRECT",
+    "RULE-SET,lancidr,DIRECT,no-resolve",
+    "RULE-SET,icloud,DIRECT",
+    "RULE-SET,apple,DIRECT",
+    "RULE-SET,proxy,Proxy",
+    "DOMAIN-SUFFIX,cn,DIRECT",
+    "RULE-SET,direct,DIRECT",
+    "RULE-SET,cncidr,DIRECT",
+    "MATCH,Proxy"
+  ],
+  "dns": {
+    "enable": true,
+    "ipv6": false,
+    "enhanced-mode": "fake-ip",
+    "fake-ip-range": "198.18.0.1/16",
+    "fake-ip-filter": ["*.lan", "*.local", "localhost", "+.msftconnecttest.com", "+.msftncsi.com", "hub.example.net"],
+    "default-nameserver": ["223.5.5.5", "119.29.29.29"],
+    "nameserver": ["https://dns.alidns.com/dns-query", "https://doh.pub/dns-query"],
+    "proxy-server-nameserver": ["https://dns.alidns.com/dns-query", "https://doh.pub/dns-query"],
+    "respect-rules": true,
+    "nameserver-policy": {
+      "hub.example.net": ["https://dns.alidns.com/dns-query", "https://doh.pub/dns-query"],
+      "rule-set:private,direct,apple,icloud": ["https://dns.alidns.com/dns-query", "https://doh.pub/dns-query"],
+      "+.cn": ["https://dns.alidns.com/dns-query", "https://doh.pub/dns-query"],
+      "rule-set:proxy": ["https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query"]
+    }
+  }
+}

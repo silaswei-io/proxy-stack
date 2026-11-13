@@ -1,5 +1,17 @@
 # v1.0.0 验证记录
 
+## 2026-11-13 首尔路由 / DNS 对齐
+
+本次对齐涉及源码、测试和文档，验证阶段未部署真实服务器。在线只读对比确认七个规则集的匹配内容一致（direct 有重复的 .cn 条目）；修正的是模板的顺序、内联兜底与 DNS 策略。测试使用虚拟身份，不保存真实凭据。
+
+- 新增无真实身份的 `tests/fixtures/seoul-routing.json`，包含首尔有序规则和 DNS 基线，以及刻意重叠的合成源样本。六项回归验证 Mihomo/QX 规则匹配、强制代理/节点引导/私网优先级、七源 provider、旧九个 classical 资源、DNS 策略与动态部署身份；将改前的 model/render 放入临时包运行，六项测试均能检出旧模板问题（含子用例共 17 处断言失败）。
+- 重建本地工具镜像后，Linux 容器内完整 `unittest discover -s /tests -v` **138 项全部通过**（235.939 秒，无跳过）；`git diff --check` 通过。安装器测试按要求在 Linux 容器运行，macOS 宿主直跑会触发平台限制和临时目录符号链接保护。
+- `python3 tests/integration/routing.py` 通过 Mihomo **v1.19.15** 原生解析，覆盖域名、IPv4、IPv6、零就绪节点，以及旧九个 classical provider 缓存配置。容器 `--network none`，本地预置 provider，不请求订阅或公共 DNS。旧 lancidr payload 中的 `no-resolve` 与新 RULE-SET 参数均被原生解析器接受。
+- 完整 `python3 tests/integration/run.py` 通过，包含上述五个配置、native Caddy/安装器预检、精确资源路由、可信测试 TLS、单/双节点 VLESS/WSS/TLS 出站、撤销/离线租约及规则更新隔离；临时容器/网络自动清理。
+- QX 官方 sample.conf、filter.snippet、no-fake-ip.conf 和 README 未提供 IP `no-resolve` 参数；模板保留官方原生 IP 三列格式及已支持 DNS 字段，不宣称 QX 与 Mihomo 的 DNS 行为完全等价。
+
+DNS 策略已做确定性配置回归和 Mihomo 原生解析；未对公共 DoH 做在线运行验收。QX 原生 iOS 导入和真实运营商环境仍待设备验证，导入/刷新说明见 [CLIENTS.md](CLIENTS.md)。
+
 v1.0.0 为全新首版多机订阅；下方 0.1.x 内容保留为历史验证记录，不代表迁移支持。
 
 2026-11-04，本地 macOS / Docker Desktop arm64 已通过：

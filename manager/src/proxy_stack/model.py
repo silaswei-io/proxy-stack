@@ -9,6 +9,8 @@ DOMAIN = re.compile(r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[
 TOKEN = re.compile(r"[0-9a-f]{48}\Z", re.ASCII)
 SOURCES = ("private", "apple", "icloud", "proxy", "direct", "cncidr", "lancidr")
 POLICY = "VPS"
+PRIVATE_NETWORKS = ("127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+                    "100.64.0.0/10", "::1/128", "fc00::/7", "fe80::/10")
 
 
 def username(value):
@@ -111,15 +113,18 @@ class Rule:
     kind: str
     value: str
     policy: str
+    no_resolve: bool = False
 
     def clash(self):
         kind = {"exact": "DOMAIN", "suffix": "DOMAIN-SUFFIX", "wildcard": "DOMAIN-REGEX", "ip4": "IP-CIDR", "ip6": "IP-CIDR6"}[self.kind]
         value = self.value
         if self.kind == "wildcard":
             value = "^" + re.escape(value).replace(r"\*", ".*").replace(r"\?", ".") + "$"
-        return kind + "," + value
+        return kind + "," + value + (",no-resolve" if self.no_resolve else "")
 
     def qx(self):
+        # Official QX IP rules have no documented no-resolve option. Do not
+        # copy Mihomo's fourth field into a Quantumult X filter resource.
         kind = {"exact": "host", "suffix": "host-suffix", "wildcard": "host-wildcard", "ip4": "ip-cidr", "ip6": "ip6-cidr"}[self.kind]
         return f"{kind}, {self.value}, {self.policy}"
 
@@ -138,13 +143,13 @@ class Rule:
         return re.fullmatch(pattern, target) is not None
 
 
-def parse_entry(value, policy):
+def parse_entry(value, policy, no_resolve=False):
     if not isinstance(value, str) or not value or len(value) > 300:
         raise ValueError("invalid rule entry")
     value = value.lower()
     if "/" in value:
         network = ipaddress.ip_network(value, strict=False)
-        return Rule("ip4" if network.version == 4 else "ip6", str(network), policy)
+        return Rule("ip4" if network.version == 4 else "ip6", str(network), policy, no_resolve)
     kind = "exact"
     if value.startswith("+."):
         kind, value = "suffix", value[2:]
@@ -158,23 +163,24 @@ def parse_entry(value, policy):
 
 
 def groups(settings, lists, endpoints=()):
-    """Order here is the sole routing authority for both clients."""
+    """Seoul baseline order for both clients; non-source groups render inline."""
     result = [("force-proxy", [Rule("exact", x, POLICY) for x in ("api.ip.sb", "ipapi.co", "api.ipapi.is", "ipwho.is")])]
     address = settings.ip
-    bootstrap = (Rule("ip4" if address.version == 4 else "ip6", str(address) + ("/32" if address.version == 4 else "/128"), "DIRECT")
+    bootstrap = (Rule("ip4" if address.version == 4 else "ip6", str(address) + ("/32" if address.version == 4 else "/128"), "DIRECT", True)
                  if address else Rule("exact", settings.domain, "DIRECT"))
     bootstraps = [bootstrap]
     for endpoint in endpoints:
         address = endpoint.ip
-        rule = (Rule("ip4" if address.version == 4 else "ip6", str(address) + ("/32" if address.version == 4 else "/128"), "DIRECT")
+        rule = (Rule("ip4" if address.version == 4 else "ip6", str(address) + ("/32" if address.version == 4 else "/128"), "DIRECT", True)
                 if address else Rule("exact", endpoint.domain, "DIRECT"))
         if rule not in bootstraps:
             bootstraps.append(rule)
     result.append(("bootstrap", bootstraps + [ Rule("exact", "localhost", "DIRECT"), Rule("suffix", "local", "DIRECT"), Rule("suffix", "lan", "DIRECT")]))
-    for name in ("private", "lancidr", "apple", "icloud", "proxy", "direct", "cncidr"):
+    result.append(("inline-private", [parse_entry(x, "DIRECT", no_resolve=True) for x in PRIVATE_NETWORKS]))
+    for name in ("private", "lancidr", "icloud", "apple", "proxy", "direct", "cncidr"):
         policy = POLICY if name == "proxy" else "DIRECT"
-        entries = [parse_entry(x, policy) for x in lists[name]]
         if name == "direct":
-            entries.insert(0, Rule("suffix", "cn", "DIRECT"))
+            result.append(("cn", [Rule("suffix", "cn", "DIRECT")]))
+        entries = [parse_entry(x, policy, no_resolve=name == "lancidr") for x in lists[name]]
         result.append((name, entries))
     return result

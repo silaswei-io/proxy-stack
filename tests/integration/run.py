@@ -215,6 +215,7 @@ def main():
         )
     # Fast native installer/stock-host adapter acceptance is mandatory in CI and
     # release integration; it uses only private fixtures and loopback probes.
+    subprocess.run([sys.executable, str(REPO / 'tests/integration/routing.py')], check=True)
     subprocess.run([sys.executable, str(REPO / 'tests/integration/preflight.py')], check=True)
     # Fail if the public payload has drifted from the advanced Compose/wrapper.
     docker("run", "--rm", "--network", "none", "--entrypoint", "python", "-v", f"{REPO}:/source:ro", TOOL,

@@ -356,7 +356,11 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn('force-policy=', sections['filter_remote'])  # preserve mixed direct/VPS routing
         policy = sections['policy'].strip().split('=', 1)[1].split(',')[0].strip()
         self.assertEqual(policy, 'VPS')
-        self.assertEqual(sections['filter_local'].strip(), 'final, ' + policy)
+        local = sections['filter_local'].strip().splitlines()
+        self.assertEqual(local[-1], 'final, ' + policy)
+        self.assertEqual(local[:-1], [r.qx().replace(', DIRECT', ', direct')
+                                     for name, entries in groups(settings, cache['lists'], [settings])
+                                     if name in ('force-proxy', 'bootstrap', 'inline-private') for r in entries])
         self.assertEqual(config.count('\nfinal, '), 1)
         self.assertIn('http_backend', sections)
         nodes = files[self.base + 'qx/nodes.txt']
