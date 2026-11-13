@@ -146,7 +146,7 @@ DOMAIN=proxy.example.com docker compose config --quiet
 DOMAIN=proxy.example.com docker compose -f compose.yaml -f compose.external.yaml config --quiet
 # 快速 native 预检：真实 Debian Caddy 2.6.2、固定栈 Caddy 和导出安装器 --check。
 python3 tests/integration/preflight.py
-# 首尔路由/DNS 与旧 classical 缓存：Mihomo v1.19.15 原生离线解析。
+# 首尔路由/DNS 与旧 classical 缓存：首次自动拉取固定 Mihomo 镜像，随后原生离线解析。
 python3 tests/integration/routing.py
 # 完整集成（内部也会运行上述 native 预检）；Linux rootful Docker 需 sudo。
 sudo python3 tests/integration/run.py

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline Mihomo validation of Seoul parity and cached classical providers."""
+"""Acquire the pinned image if needed, then validate Mihomo offline."""
 import copy
 import json
 import os
@@ -20,6 +20,12 @@ MIHOMO = os.environ.get('TEST_MIHOMO_IMAGE', 'metacubex/mihomo:v1.19.15@sha256:d
 
 
 def main():
+    # Fresh CI runners have no image cache. Acquire the exact image before
+    # starting validators with networking and implicit pulls disabled.
+    cached = subprocess.run(['docker', 'image', 'inspect', MIHOMO],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+    if cached.returncode:
+        subprocess.run(['docker', 'pull', MIHOMO], check=True, timeout=180)
     with tempfile.TemporaryDirectory(prefix='proxy-stack-routing-') as temporary:
         root = Path(temporary).resolve()
         pending = [Settings('pending.example.org', 'Pending domain'), Settings('8.8.4.4', 'Pending IP'),
