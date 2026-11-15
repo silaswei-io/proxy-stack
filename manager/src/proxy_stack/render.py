@@ -1,6 +1,7 @@
 """Pure renderers: never read state or perform network requests."""
 import json
 
+from . import chains
 from .model import POLICY, SOURCES, Settings, groups
 from .routes import ASSET_PATTERN, PUBLIC_PATTERN, RULE_NAMES, canonical_path, caddy_rewrites
 
@@ -27,13 +28,41 @@ def encoded(value):
 
 
 def xray(state):
-    return encoded({
+    config = {
         "log": {"loglevel": "warning"},
         "inbounds": [{"listen": "0.0.0.0", "port": 10000, "protocol": "vless",
                       "settings": {"clients": [{"id": user["uuid"]} for user in state["users"].values()], "decryption": "none"},
                       "streamSettings": {"network": "ws", "wsSettings": {"path": state["ws_path"]}}}],
         "outbounds": [{"protocol": "freedom", "tag": "direct"}],
-    })
+    }
+    routes = state.get('chains', [])
+    if routes:
+        chains.validate_routes(routes)
+        clients = config['inbounds'][0]['settings']['clients']
+        direct = []
+        for client in clients:
+            client['email'] = client['id'] + '@direct'
+            direct.append(client['email'])
+        config['inbounds'][0]['tag'] = 'managed'
+        routing = [{'type': 'field', 'user': direct, 'outboundTag': 'direct'}]
+        for route in routes:
+            endpoint = Settings(route['exit']['domain'], 'Exit', port=route['exit']['port'])
+            for user in state['users'].values():
+                ident = chains.credential(user['uuid'], route['id'])
+                email = ident + '@chain'
+                clients.append({'id': ident, 'email': email})
+                config['outbounds'].append({
+                    'tag': ident, 'protocol': 'vless',
+                    'settings': {'vnext': [{'address': endpoint.domain, 'port': endpoint.port,
+                                           'users': [{'id': user['uuid'], 'encryption': 'none'}]}]},
+                    'streamSettings': {'network': 'ws', 'security': 'tls',
+                                       'tlsSettings': {'serverName': endpoint.domain, 'allowInsecure': False},
+                                       'wsSettings': {'path': route['exit']['ws_path'], 'headers': {'Host': endpoint.host}}}})
+                routing.append({'type': 'field', 'user': [email], 'outboundTag': ident})
+        config['outbounds'].append({'protocol': 'blackhole', 'tag': 'reject'})
+        routing.append({'type': 'field', 'inboundTag': ['managed'], 'outboundTag': 'reject'})
+        config['routing'] = {'rules': routing}
+    return encoded(config)
 
 
 def caddy(settings, state, external=False):
@@ -130,12 +159,35 @@ def snippet(settings):
 
 def ready_nodes(settings, state):
     return [(Settings(**node["settings"]), node["ws_path"]) for node in state["nodes"].values()
-            if node.get("enabled") and node.get("ready") and node.get("acked") == node.get("desired")]
+            if chains.ready(node) and node.get("publish", True)]
+
+
+def client_nodes(settings, state, user):
+    """Selectable physical and two-hop lines shared with the completion probe."""
+    available = ready_nodes(settings, state)
+    nodes, qx_nodes = [], []
+    lines = [(endpoint, path, user['uuid']) for endpoint, path in available]
+    for chain in state.get('chains', {}).values():
+        entry, exit_node = (state['nodes'][chain[k]] for k in ('entry', 'exit'))
+        if chains.ready(entry) and chains.ready(exit_node):
+            endpoint = Settings(**dict(entry['settings'], node_name=chain['name']))
+            lines.append((endpoint, entry['ws_path'], chains.credential(user['uuid'], chain['id'])))
+    for endpoint, path, identity in lines:
+        node = {"name": endpoint.node_name, "type": "vless", "server": endpoint.domain,
+                "port": endpoint.port, "uuid": identity, "network": "ws", "tls": True,
+                "servername": endpoint.domain, "skip-cert-verify": False, "udp": False,
+                "ws-opts": {"path": path, "headers": {"Host": endpoint.host}}}
+        if endpoint.ip:
+            del node["servername"]
+        nodes.append(node)
+        qx_nodes.append(f"vless={endpoint.host}:{endpoint.port}, method=none, password={identity}, "
+                        "obfs=wss, " + (f"obfs-host={endpoint.domain}, " if not endpoint.ip else "") +
+                        f"obfs-uri={path}, tls-verification=true, fast-open=false, udp-relay=false, tag={endpoint.node_name}\n")
+    return nodes, qx_nodes
 
 
 def public_files(settings, state, cache):
     endpoints = [Settings(**n["settings"]) for n in state.get("nodes", {}).values() if n.get("enabled")]
-    available = ready_nodes(settings, state)
     routing = groups(settings, cache["lists"], endpoints)
     files = {}
     # Keep all nine existing URLs and their classical payload format for cached
@@ -162,18 +214,7 @@ def public_files(settings, state, cache):
         base = "sub/" + user["token"] + "/"
         def url(suffix):
             return settings.origin + canonical_path(user["token"], suffix)
-        nodes, qx_nodes = [], []
-        for endpoint, path in available:
-            node = {"name": endpoint.node_name, "type": "vless", "server": endpoint.domain,
-                    "port": endpoint.port, "uuid": user["uuid"], "network": "ws", "tls": True,
-                    "servername": endpoint.domain, "skip-cert-verify": False, "udp": False,
-                    "ws-opts": {"path": path, "headers": {"Host": endpoint.host}}}
-            if endpoint.ip:
-                del node["servername"]
-            nodes.append(node)
-            qx_nodes.append(f"vless={endpoint.host}:{endpoint.port}, method=none, password={user['uuid']}, "
-                            "obfs=wss, " + (f"obfs-host={endpoint.domain}, " if not endpoint.ip else "") +
-                            f"obfs-uri={path}, tls-verification=true, fast-open=false, udp-relay=false, tag={endpoint.node_name}\n")
+        nodes, qx_nodes = client_nodes(settings, state, user)
         names = [node["name"] for node in nodes]
         clash = {"mixed-port": 7890, "allow-lan": False, "mode": "rule", "log-level": "warning", "ipv6": False,
                  "dns": mihomo_dns(settings, endpoints),

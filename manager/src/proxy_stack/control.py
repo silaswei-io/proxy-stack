@@ -22,6 +22,7 @@ from . import render
 from .model import Settings, TOKEN
 from .storage import atomic_file
 from .topology import ws_path
+from . import chains
 
 MAX_BODY = 65536
 PATHS = ('/control/v1/enroll', '/control/v1/poll', '/control/v1/ack', '/control/v1/detach')
@@ -121,7 +122,8 @@ class Hub:
                 raise PermissionError()
             if sum(n['enabled'] for n in state['nodes'].values()) >= 64:
                 raise ValueError('node limit reached')
-            if any(n['enabled'] and Settings(**n['settings']).node_name == endpoint.node_name for n in state['nodes'].values()):
+            if (any(n['enabled'] and Settings(**n['settings']).node_name == endpoint.node_name for n in state['nodes'].values())
+                    or any(c['name'] == endpoint.node_name for c in state.get('chains', {}).values())):
                 raise ValueError('node names must be unique')
             if any(n['enabled'] and (n['settings']['domain'], n['settings']['port']) == (endpoint.domain, endpoint.port) for n in state['nodes'].values()):
                 raise ValueError('node address already enrolled')
@@ -129,7 +131,10 @@ class Hub:
             if identifier in state['nodes'] or any(n.get('auth') == digest(token) for n in state['nodes'].values()):
                 raise ValueError('peer identity already registered')
             if len(state['nodes']) >= 128:
-                obsolete = next(k for k,n in state['nodes'].items() if k != 'local' and not n['enabled'])
+                referenced = {c[k] for c in state.get('chains', {}).values() for k in ('entry', 'exit')}
+                obsolete = next((k for k,n in state['nodes'].items() if k != 'local' and not n['enabled'] and k not in referenced), None)
+                if obsolete is None:
+                    raise ValueError('node history full; remove obsolete chains first')
                 del state['nodes'][obsolete]
             state['nodes'][identifier] = {'settings': asdict(endpoint), 'ws_path': path, 'enabled': True,
                                           'desired': state['generation'], 'acked': 0, 'ready': False, 'created': time.time(), 'auth': digest(token)}
@@ -151,8 +156,12 @@ class Hub:
         return identifier, node
 
     def desired(self, state, node):
-        return {'generation': node['desired'], 'lease_seconds': self.store.settings(state).lease_seconds,
-                'ws_path': node['ws_path'], 'users': [u['uuid'] for u in state['users'].values()]}
+        desired = {'generation': node['desired'], 'lease_seconds': self.store.settings(state).lease_seconds,
+                   'ws_path': node['ws_path'], 'users': [u['uuid'] for u in state['users'].values()]}
+        routes = chains.entry_routes(state, node)
+        if routes:
+            desired['chains'] = routes
+        return desired
 
     def exchange(self, action, data, authorization=None, local=False):
         object_keys(data, ('generation',))
@@ -170,6 +179,7 @@ class Hub:
             if action == 'detach':
                 node['enabled'], node['ready'] = False, False
                 node.pop('auth', None)
+                self.invalidate_entries(state, identifier)
                 publish = True
             elif action == 'ack':
                 if data['generation'] != node['desired']:
@@ -180,7 +190,8 @@ class Hub:
                 node['acked'], node['ready'] = data['generation'], True
             elif action == 'poll':
                 # Restarting/failed runtimes explicitly report generation zero.
-                if data['generation'] != node['acked'] and node['ready']:
+                expired = time.time() - self.heartbeats().get(identifier, 0) >= self.store.settings(state).lease_seconds
+                if node['ready'] and (data['generation'] != node['acked'] or expired):
                     node['ready'] = False
                     publish = True
             else:
@@ -199,6 +210,64 @@ class Hub:
             node = state['nodes'][identifier]
             node['enabled'], node['ready'] = False, False
             node.pop('auth', None)
+            self.invalidate_entries(state, identifier)
+            self.save(state, publish=True)
+
+    @staticmethod
+    def invalidate_entries(state, exit_id):
+        entries = {c['entry'] for c in state.get('chains', {}).values() if c['exit'] == exit_id}
+        Hub.invalidate_nodes(state, entries)
+
+    @staticmethod
+    def invalidate_nodes(state, identifiers):
+        if identifiers:
+            state['generation'] += 1
+            for ident in identifiers:
+                node = state['nodes'][ident]
+                if node['enabled']:
+                    node['desired'], node['ready'] = state['generation'], False
+
+    def publish(self, identifier, visible):
+        if type(visible) is not bool:
+            raise ValueError('publication must be on or off')
+        with self.store.locked():
+            state = self.state()
+            node = state['nodes'].get(identifier)
+            if not node or not node['enabled']:
+                raise ValueError('unknown active node ID')
+            node['publish'] = visible
+            self.save(state, publish=True)
+
+    def chain(self, action, ident=None, name=None, entry=None, exit=None):
+        if action == 'list':
+            with self.store.locked(updater=True):
+                state, beats = self.state(), self.heartbeats()
+                lease, now = self.store.settings(state).lease_seconds, time.time()
+                def available(ident):
+                    return chains.ready(state['nodes'][ident]) and now - beats.get(ident, 0) < lease
+                return [dict(ident=k, name=c['name'], entry=c['entry'], exit=c['exit'],
+                             status='ready' if all(available(n) for n in (c['entry'], c['exit'])) else 'unavailable')
+                        for k, c in state.get('chains', {}).items()]
+        with self.store.locked():
+            state = self.state()
+            from .model import username
+            username(ident)
+            lines = state.setdefault('chains', {})
+            if action == 'add':
+                if ident in lines:
+                    raise ValueError('chain already exists')
+                for node_id in (entry, exit):
+                    if node_id not in state['nodes'] or not state['nodes'][node_id]['enabled']:
+                        raise ValueError('chain requires active managed physical nodes (local for hub entry)')
+                lines[ident] = {'id': secrets.token_hex(24), 'name': name, 'entry': entry, 'exit': exit}
+                chains.validate(state)
+            elif action == 'remove':
+                if ident not in lines:
+                    raise ValueError('unknown chain')
+                entry = lines.pop(ident)['entry']
+            else:
+                raise ValueError('invalid chain action')
+            self.invalidate_nodes(state, {entry})
             self.save(state, publish=True)
 
     def reap(self):
@@ -218,6 +287,7 @@ class Hub:
             state, beats = self.state(), self.heartbeats()
             lease = self.store.settings(state).lease_seconds
             return [{'id': identifier, 'name': n['settings']['node_name'], 'address': Settings(**n['settings']).origin,
+                     'publish': n.get('publish', True),
                      'desired': n['desired'], 'acknowledged': n['acked'],
                      'active': n['acked'] if n['ready'] and time.time() - beats.get(identifier, 0) < lease else 0,
                      'last_seen': beats.get(identifier),

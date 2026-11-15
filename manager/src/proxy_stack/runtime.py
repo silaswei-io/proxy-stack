@@ -9,14 +9,17 @@ import urllib.error
 import uuid
 from pathlib import Path
 
-from . import render
+from . import render, chains
 from .control import Hub, object_keys, request
 from .storage import atomic_file
 from .topology import ws_path
 
 
 def validate_desired(data, expected_path):
-    object_keys(data, ('generation', 'lease_seconds', 'ws_path', 'users'))
+    keys = ('generation', 'lease_seconds', 'ws_path', 'users')
+    object_keys(data, (*keys, 'chains') if isinstance(data, dict) and 'chains' in data else keys)
+    if 'chains' in data:
+        chains.validate_routes(data['chains'])
     if (type(data['generation']) is not int or not 1 <= data['generation'] <= 2**53 or
             type(data['lease_seconds']) is not int or not 10 <= data['lease_seconds'] <= 3600 or
             ws_path(data['ws_path']) != expected_path or not isinstance(data['users'], list) or
@@ -59,7 +62,8 @@ class Supervisor:
         if self.generation == desired['generation'] and self.alive():
             return
         config = render.xray({'ws_path': desired['ws_path'],
-                              'users': {str(i): {'uuid': u} for i, u in enumerate(desired['users'])}})
+                              'users': {str(i): {'uuid': u} for i, u in enumerate(desired['users'])},
+                              'chains': desired.get('chains', [])})
         candidate = self.directory / 'candidate.json'
         target = self.directory / 'active.json'
         atomic_file(candidate, config)

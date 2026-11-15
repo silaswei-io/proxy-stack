@@ -128,8 +128,19 @@ def main(argv=None):
     sub.add_parser("join", help="read one-use join code from stdin, never argv")
     sub.add_parser("detach", help="stop this node and revoke its hub enrollment")
     node = sub.add_parser("node")
-    node.add_argument("action", choices=("code", "list", "remove", "join"))
+    node.add_argument("action", choices=("code", "list", "remove", "join", "publish"))
     node.add_argument("id", nargs="?")
+    node.add_argument("visibility", nargs="?", choices=("on", "off"))
+    chain = sub.add_parser("chain", help="manage server-side physical two-hop lines on the hub")
+    chain_sub = chain.add_subparsers(dest="action", required=True)
+    chain_sub.add_parser("list")
+    chain_remove = chain_sub.add_parser("remove")
+    chain_remove.add_argument("ident", type=username)
+    chain_add = chain_sub.add_parser("add")
+    chain_add.add_argument("ident", type=username)
+    chain_add.add_argument("--name", required=True)
+    chain_add.add_argument("--entry", required=True)
+    chain_add.add_argument("--exit", required=True)
     user = sub.add_parser("user")
     user.add_argument("action", choices=("add", "revoke"))
     user.add_argument("name", type=username)
@@ -176,10 +187,23 @@ def main(argv=None):
             else:
                 from .runtime import Runtime
                 Runtime(store).run(stop)
+        elif args.command == "chain":
+            from .control import Hub
+            result = Hub(store).chain(args.action, getattr(args, 'ident', None), getattr(args, 'name', None),
+                                      getattr(args, 'entry', None), getattr(args, 'exit', None))
+            print(json.dumps(result, ensure_ascii=False) if args.action == 'list' else
+                  "Line updated; wait for entry acknowledgement. Offline credentials expire within the entry lease.")
         elif args.command == "node":
             from .control import Hub
             hub = Hub(store)
-            if args.action == "join":
+            if args.action != 'publish' and args.visibility:
+                raise ValueError('visibility is only for node publish')
+            if args.action == 'publish':
+                if not args.id or not args.visibility:
+                    raise ValueError('usage: node publish ID on|off')
+                hub.publish(args.id, args.visibility == 'on')
+                print('Direct publication updated; node remains available as a chain exit.')
+            elif args.action == "join":
                 if args.id:
                     raise ValueError("join reads its code from stdin")
                 from .control import join

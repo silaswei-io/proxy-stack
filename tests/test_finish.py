@@ -242,6 +242,103 @@ class FinishTests(unittest.TestCase):
         hub.exchange('ack', {'generation': desired['generation']}, auth)
         self.assertEqual(self.run_finish()[0], 0)
 
+    def test_hidden_direct_pending_and_ready_chain_completion(self):
+        from proxy_stack.control import decode_code
+        self.ack()
+        hub = Hub(self.store)
+        invitation = decode_code(hub.code())
+        peer = hub.enroll({'secret': invitation['secret'],
+                           'settings': asdict(Settings('exit.example.com', 'Exit', role='node')),
+                           'ws_path': '/ws/' + 'c' * 48,
+                           'peer': {'id': 'a' * 48, 'token': 'b' * 48}})
+        auth = 'Bearer ' + peer['id'] + ':' + peer['token']
+        desired = hub.exchange('poll', {'generation': 0}, auth)
+        hub.exchange('ack', {'generation': desired['generation']}, auth)
+        links = finish.snapshot(self.store)['links']
+        for node_id in ('local', peer['id']):
+            hub.publish(node_id, False)
+        hidden = finish.snapshot(self.store)
+        self.assertEqual(hidden['nodes'], 0)
+        self.assertTrue(hidden['local_required'])
+        self.assertTrue(hidden['local_ready'])
+        code, output = self.run_finish()
+        self.assertEqual(code, 1)
+        self.assert_private(output)
+
+        hub.chain('add', 'exit', 'Exit via Entry', 'local', peer['id'])
+        pending = finish.snapshot(self.store)
+        self.assertEqual(pending['nodes'], 0)
+        self.assertTrue(pending['local_required'])
+        self.assertFalse(pending['local_ready'])
+        code, output = self.run_finish()
+        self.assertEqual(code, 1)
+        self.assert_private(output)
+
+        # The GET verifies the old empty publication while entry ack publishes
+        # the now-ready line. Neither that response nor its URLs may be endorsed.
+        def acknowledge_during_get(*_a, **_k):
+            old = self.asset()
+            self.ack()
+            return Response(old)
+        self.opener.return_value.open.side_effect = acknowledge_during_get
+        code, output = self.run_finish()
+        self.assertEqual(code, 1)
+        self.assert_private(output)
+        self.opener.return_value.open.side_effect = lambda *_a, **_k: Response(self.asset())
+        ready = finish.snapshot(self.store)
+        self.assertEqual(ready['nodes'], 1)
+        self.assertTrue(ready['local_required'])
+        self.assertTrue(ready['local_ready'])
+        self.assertTrue(links == ready['links'])
+        code, output = self.run_finish()
+        self.assertEqual(code, 0)
+        self.assertIn('已确认节点 1', output)
+        for _, url in links:
+            self.assertTrue(url in output)
+
+        # An unreaped stale published line is unusable when either physical
+        # endpoint loses readiness or its current lease.
+        state = self.store.state()
+        state['nodes'][peer['id']]['ready'] = False
+        hub.save(state)
+        self.assertEqual(finish.snapshot(self.store)['nodes'], 0)
+        state['nodes'][peer['id']]['ready'] = True
+        hub.save(state)
+        beats = hub.heartbeats()
+        beats[peer['id']] = time.time() - 11
+        atomic_file(self.store.model / 'heartbeats.json', json.dumps(beats))
+        self.assertEqual(finish.snapshot(self.store)['nodes'], 0)
+        code, output = self.run_finish()
+        self.assertEqual(code, 1)
+        self.assert_private(output)
+
+    def test_completion_counts_current_published_selectable_lines_only(self):
+        self.ack()
+        hub = Hub(self.store)
+        self.assertEqual(finish.snapshot(self.store)['nodes'], 1)
+        hub.publish('local', False)
+        # Simulate state ahead of the selected revision (e.g. interrupted publish).
+        state = self.store.state()
+        state['nodes']['local']['publish'] = True
+        hub.save(state)
+        self.assertEqual(finish.snapshot(self.store)['nodes'], 0)
+        code, output = self.run_finish()
+        self.assertEqual(code, 1)
+        self.assert_private(output)
+        hub.publish('local', True)
+        self.assertEqual(finish.snapshot(self.store)['nodes'], 1)
+
+        # A publication with identical owner bytes is still a new manifest.
+        def republish_during_get(*_a, **_k):
+            old = self.asset()
+            hub.publish('local', True)
+            self.assertTrue(old == self.asset())
+            return Response(old)
+        self.opener.return_value.open.side_effect = republish_during_get
+        code, output = self.run_finish()
+        self.assertEqual(code, 1)
+        self.assert_private(output)
+
     def test_concurrent_revoke_cannot_endorse_old_response(self):
         self.ack()
         def changed(*_a, **_k):

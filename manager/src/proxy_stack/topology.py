@@ -34,6 +34,8 @@ def validate(state):
         if identifier != 'local' and not TOKEN.fullmatch(identifier):
             raise ValueError('invalid node ID')
         endpoint = Settings(**node['settings'])
+        if type(node.get('publish', True)) is not bool:
+            raise ValueError('invalid node publication flag')
         ws_path(node['ws_path'])
         if node['enabled']:
             if endpoint.node_name in names:
@@ -41,7 +43,8 @@ def validate(state):
             names.add(endpoint.node_name)
         if any(type(node.get(k)) is not int or not 0 <= node[k] <= state['generation'] for k in ('desired', 'acked')):
             raise ValueError('invalid node generation')
-    return state
+    from .chains import validate as validate_chains
+    return validate_chains(state)
 
 
 def invalidate(state):

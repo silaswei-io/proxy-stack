@@ -218,14 +218,17 @@ os.execv('/usr/local/bin/xray',['xray']+args)
             return False
         finally:
             conn.close()
-    def mihomo_egress(i):
-        until(lambda: select(names[i]), 'Mihomo controller did not select node')
+    def mihomo_egress(i, line=None, allow_failure=False):
+        until(lambda: select(line or names[i]), 'Mihomo controller did not select node')
         with socket.create_connection(('127.0.0.1', socks_port), timeout=10) as stream:
             stream.sendall(b'\x05\x01\x00')
             assert recv_exact(stream, 2) == b'\x05\x00'
             stream.sendall(b'\x05\x01\x00\x01' + socket.inet_aton(origin_ip) + struct.pack('!H', 8000))
             reply = recv_exact(stream, 4)
-            assert reply[:2] == b'\x05\x00', reply
+            if reply[:2] != b'\x05\x00':
+                if allow_failure:
+                    return b''
+                raise AssertionError('SOCKS connection rejected')
             assert reply[3] == 1, reply
             recv_exact(stream, 6)
             stream.sendall(b'GET / HTTP/1.1\r\nHost: origin\r\nConnection: close\r\n\r\n')
@@ -235,6 +238,8 @@ os.execv('/usr/local/bin/xray',['xray']+args)
                 if not chunk:
                     break
                 response += chunk
+        if allow_failure:
+            return response
         runtime_ip = json.loads(docker('inspect', runtimes[i - 1]))[0]['NetworkSettings']['Networks'][network]['IPAddress']
         assert ('proxy-stack-egress-ok ' + runtime_ip).encode() in response, response
     for i in (1, 2):
@@ -295,6 +300,93 @@ os.execv('/usr/local/bin/xray',['xray']+args)
     finally:
         docker('unpause', api)
     until(lambda: all(n['status'] == 'synced' for n in statuses()), 'recovery after blocked control request failed')
+    # Managed lines use the already enrolled physical nodes and unchanged gateways.
+    first_id = json.loads((data[1] / 'model/peer.json').read_text())['id']
+    gateway_configs = [(directory / ('Caddyfile' + str(i))).read_bytes() for i in range(3)]
+    exit_before = manager(0, code="from proxy_stack.storage import Store; from proxy_stack.control import Hub; import json; s=Store('/data'); n=s.state()['nodes'][" + repr(second_id) + "]; print(json.dumps(Hub(s).desired(s.state(),n)))")
+    manager(0, 'chain', 'add', 'usa', '--name', 'USA via Seoul', '--entry', first_id, '--exit', second_id)
+    until(lambda: all(n['status'] == 'synced' for n in statuses()), 'chain entry not acknowledged')
+    manager(0, 'node', 'publish', second_id, 'off')
+    state = json.loads((data[0] / 'model/state.json').read_text())
+    chain_id = state['chains']['usa']['id']
+    config = json.loads(https(0, '/sub/' + token + '/clash.yaml')[1])
+    assert [p['name'] for p in config['proxies']] == ['Node One', 'USA via Seoul']
+    assert config['proxies'][1]['server'] == domains[1]
+    assert b'tag=USA via Seoul' in https(0, '/sub/' + token + '/qx/nodes.txt')[1]
+    exit_after = manager(0, code="from proxy_stack.storage import Store; from proxy_stack.control import Hub; import json; s=Store('/data'); t=s.state(); print(json.dumps(Hub(s).desired(t,t['nodes'][" + repr(second_id) + "])))")
+    assert exit_before == exit_after
+    assert set(json.loads(exit_after)) == {'generation', 'lease_seconds', 'ws_path', 'users'}
+    for i in (1, 2):
+        docker('run', '--rm', '--read-only', '--cap-drop=ALL', '--network', 'none', '--entrypoint', '/usr/local/bin/xray',
+               '-v', f'{data[i] / "runtime/xray"}:/config:ro', TOOL, 'run', '-test', '-config', '/config/active.json')
+    active = json.loads((data[1] / 'runtime/xray/active.json').read_text())
+    from proxy_stack.chains import credential
+    for user in (owner, bob):
+        derived = credential(user['uuid'], chain_id)
+        outbound = next(o for o in active['outbounds'] if o.get('tag') == derived)
+        assert outbound['settings']['vnext'][0]['users'][0]['id'] == user['uuid']
+        line_user = {'uuid': derived}
+        result = tunnel(ports[1], context, json.loads((data[1] / 'model/state.json').read_text()), line_user,
+                        origin_ip, server_hostname=domains[1])
+        exit_ip = json.loads(docker('inspect', runtimes[1]))[0]['NetworkSettings']['Networks'][network]['IPAddress']
+        assert ('proxy-stack-egress-ok ' + exit_ip).encode() in result
+    # Reload the actual generated Mihomo lines and exercise both selections.
+    config.update({'mixed-port': 7890, 'allow-lan': True, 'external-controller': '0.0.0.0:9090',
+                   'dns': {'enable': False}, 'rules': ['MATCH,VPS']})
+    (mihomo_dir / 'config.yaml').write_text(json.dumps(config))
+    conn = http.client.HTTPConnection('127.0.0.1', control_port, timeout=5)
+    conn.request('PUT', '/configs?force=true', json.dumps({'path': '/root/.config/mihomo/config.yaml'}), {'Content-Type': 'application/json'})
+    response = conn.getresponse()
+    response.read()
+    assert response.status == 204
+    conn.close()
+    mihomo_egress(1)
+    mihomo_egress(2, 'USA via Seoul')
+    # Stop only the exit Xray runtime; entry direct must keep working.
+    docker('stop', runtimes[1])
+    try:
+        mihomo_egress(1)
+        until(lambda: select('USA via Seoul'), 'chain selection missing')
+        try:
+            failed_response = mihomo_egress(2, 'USA via Seoul', allow_failure=True)
+        except (OSError, EOFError):
+            failed_response = b''
+        assert b'proxy-stack-egress-ok' not in failed_response, 'failed exit still produced egress'
+        # Prove no entry freedom fallback even for cached credentials.
+        try:
+            result = tunnel(ports[1], context, json.loads((data[1] / 'model/state.json').read_text()),
+                            {'uuid': credential(owner['uuid'], chain_id)}, origin_ip, server_hostname=domains[1])
+        except (OSError, EOFError):
+            pass
+        else:
+            raise AssertionError('chain credential fell back to entry egress')
+    finally:
+        docker('start', runtimes[1])
+    until(lambda: all(n['status'] == 'synced' for n in statuses()), 'exit recovery failed')
+    mihomo_egress(2, 'USA via Seoul')
+    # Per-friend revocation removes both its direct and derived entry credentials.
+    revoked = credential(bob['uuid'], chain_id)
+    manager(0, 'user', 'revoke', 'bob')
+    until(lambda: all(n['status'] == 'synced' for n in statuses()), 'chain friend revocation not acknowledged')
+    try:
+        tunnel(ports[1], context, json.loads((data[1] / 'model/state.json').read_text()), {'uuid': revoked},
+               origin_ip, server_hostname=domains[1])
+    except (OSError, EOFError):
+        pass
+    else:
+        raise AssertionError('revoked chain friend accepted')
+    mihomo_egress(2, 'USA via Seoul')
+    manager(0, 'chain', 'remove', 'usa')
+    until(lambda: all(n['status'] == 'synced' for n in statuses()), 'chain removal not acknowledged')
+    try:
+        tunnel(ports[1], context, json.loads((data[1] / 'model/state.json').read_text()),
+               {'uuid': credential(owner['uuid'], chain_id)}, origin_ip, server_hostname=domains[1])
+    except (OSError, EOFError):
+        pass
+    else:
+        raise AssertionError('removed line accepted')
+    assert all((directory / ('Caddyfile' + str(i))).read_bytes() == gateway_configs[i] for i in range(3))
+    print('PASS: managed generated Mihomo/QX two-hop lines, native Xray validation, per-user exit identities, entry/exit source IP, exit failure without fallback, revoke/remove without gateway changes', flush=True)
     manager(0, 'node', 'remove', second_id)
     peer = json.loads((data[2] / 'model/peer.json').read_text())
     auth = {'Authorization': 'Bearer ' + peer['id'] + ':' + peer['token']}

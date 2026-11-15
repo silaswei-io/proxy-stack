@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 
-from . import render, rules
+from . import render, rules, chains
 from .model import Settings, TOKEN, username
 from .topology import initialize, validate, invalidate
 
@@ -101,8 +101,21 @@ class Store:
     def credentials():
         return {"uuid": str(uuid.uuid4()), "token": secrets.token_hex(24)}
 
+    def publication_state(self, state, now=None):
+        """A rendering snapshot backed by live leases, even without any chains."""
+        publication = copy.deepcopy(state)
+        beats_path = self.model / 'heartbeats.json'
+        beats = self.read(beats_path) if beats_path.exists() else {}
+        now = time.time() if now is None else now
+        lease = self.settings(state).lease_seconds
+        for node_id, node in publication['nodes'].items():
+            if not 0 <= now - beats.get(node_id, 0) < lease:
+                node['ready'] = False
+        return publication
+
     def stage(self, settings, state, cache):
-        files = render.public_files(settings, state, cache)
+        # The reaper may be stopped or the last chain may just have been removed.
+        files = render.public_files(settings, self.publication_state(state), cache)
         revision = str(time.time_ns()) + "-" + secrets.token_hex(6)
         directory = self.public / "releases" / revision
         directory.mkdir(mode=0o755)
@@ -168,8 +181,9 @@ class Store:
         if refresh is not None:
             writes.append((self.cache / "refresh.json", render.encoded(refresh)))
         if private:
+            xray_state = dict(state, chains=chains.entry_routes(state, state["nodes"].get("local")))
             writes += [(self.model / "state.json", render.encoded(state)),
-                       (self.runtime / "xray/config.json", render.xray(state)),
+                       (self.runtime / "xray/config.json", render.xray(xray_state)),
                        (self.runtime / "caddy/Caddyfile", render.caddy(settings, state)),
                        (self.runtime / "caddy/external.Caddyfile", render.caddy(settings, state, True)),
                        (self.runtime / "host-caddy.snippet", render.snippet(settings))]

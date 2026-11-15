@@ -1371,6 +1371,31 @@ class InstallerTests(unittest.TestCase):
         self.assertNotEqual(headless.returncode, 0)
         self.assertIn("交互终端", headless.stderr)
 
+    def test_line_menu_and_wrapper_forwarding(self):
+        from proxy_stack.control import Hub, decode_code
+        from proxy_stack.model import Settings
+        from proxy_stack.storage import Store
+        from dataclasses import asdict
+        self.assert_ok(self.install('--prepare-only'))
+        store = Store(self.destination / 'data')
+        hub = Hub(store)
+        invitation = decode_code(hub.code())
+        peer = {'id': 'a' * 48, 'token': 'b' * 48}
+        hub.enroll({'secret': invitation['secret'], 'peer': peer,
+                    'settings': asdict(Settings('usa.example.com', 'USA', role='node')),
+                    'ws_path': '/ws/' + 'c' * 48})
+        code, output = self.terminal([str(self.destination / 'proxyctl'), 'menu'],
+                                    '12\n13\nusa\nUSA via Seoul\nlocal\n' + peer['id'] + '\n15\n' + peer['id'] + '\noff\n12\n14\nusa\n0\n')
+        self.assertEqual(code, 0, output)
+        state = store.state()
+        self.assertFalse(state['nodes'][peer['id']]['publish'])
+        self.assertEqual(state['chains'], {})
+        self.assertIn('USA via Seoul', output)
+        calls = self.calls()
+        self.assertTrue(any('chain' in c and 'add' in c for c in calls))
+        self.assertTrue(any('chain' in c and 'remove' in c for c in calls))
+        self.assertFalse(any('restart' in c for c in calls))
+
     def test_two_prompts_read_tty_when_script_arrives_via_pipe(self):
         installer_file = self.root / "installer.sh"
         installer_file.write_text(self.payload)

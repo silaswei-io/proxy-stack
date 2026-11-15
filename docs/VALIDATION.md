@@ -1,5 +1,19 @@
 # v1.0.0 验证记录
 
+## 2026-11-15 受管服务端两跳线路（本地 worktree）
+
+实现保留三种安装角色和 v1.0.0 命名，仅增加中心线路模型、入口 desired 扩展、Xray user 路由与两种订阅的普通节点条目。每条线路持久化随机内部 ID；入口按用户 UUID namespace + 内部 ID 派生 UUID，普通出口保持 generation/lease_seconds/ws_path/users 四字段对象。控制扩展按入口裁剪为必要出口端点，避免发送完整拓扑或订阅/peer token。使用紧凑线路描述而非逐用户重复出站描述，入口再生成完整 Xray 配置。
+
+本地 macOS / Docker Desktop 的 Linux arm64 验证：首次实现 **146 项完整单元/回归通过**（248.933 秒）；完整 `tests/integration/run.py` 通过，最终镜像的双节点/两跳部分另行复跑通过。两种 Compose 配置、shell 语法、root/template 包装器一致性和 `git diff --check` 通过。Linux amd64 GitHub Actions 未运行，未触发发布。
+
+后续审查修复：finish 统计当前 manifest 所指订阅中、仍有有效租约和当前代次回执支持的可选线路，隐藏直连不再被当作可用订阅，端点隐藏的就绪两跳计为一条；核对本地资产哈希，并在 HTTPS 前后比较 manifest revision，拒绝并发发布期间的旧响应。原 local_required/local_ready 和订阅 URL 语义保留。租约过滤统一用于所有发布，包括未运行 reaper 时移除最后一条线路，以及没有 chains 字段的旧状态；不修改转发路径。Linux 容器定向回归 **52 项通过**（finish 16、chain 8、stack 22、routing parity 6），shell/root-template 一致性检查通过；此次修复未重跑完整 Docker 集成。
+
+测试加入现有 `unittest discover` 与 `tests/integration/run.py` 路径，CI 和 main 发布流程自动执行，未修改测试后发布 GHCR 的门槛。新增覆盖旧状态/无线路快照、独立用户身份与撤销、精确出口协议、定向代次/回执、过期租约（含未运行 reaper 的刷新及续租恢复）、offline/remove/detach、CLI/中文菜单/包装器、名称/32 条上限和写入失败回滚。
+
+本地 Docker 集成复用固定 digest 的 Xray 26.7.11、Caddy 2.11.4 和 Mihomo 1.19.15：普通节点正常加入，再创建线路并隐藏出口直连；不改测试网关配置，原生校验入口和出口 Xray 配置，实际导入生成的 Mihomo 条目并分别验证入口/出口源 IP。owner 与朋友分别使用自己的出口 UUID；出口停止后，入口直连仍成功、两跳及缓存线路凭据均无法出网，恢复出口后线路可用。撤销朋友、移除线路后原凭据拒绝，owner 保持可用。测试只给私有模拟 origin 的精确 IP/TCP 8000 增加测试许可，并通过容器环境指定一次性 CA；生产 TLS 验证和私网出站保护不变。
+
+本次没有 SSH、部署、真实服务配置修改或 Git 提交/推送。临时测试网络、容器、凭据和目录由 harness 清理。运行中的入口配置更新沿用现有 Xray 重启机制；最多两跳。Quantumult X 只验证生成格式，原生 iOS 设备未验收；公网 ACME、真实中国 → 首尔 → 美国网络和长期规模性能未在本次验证。
+
 ## 2026-11-13 CI 冷启动镜像准备修复
 
 远程 138 项单元测试通过后，新增路由集成因 `--pull=never` 且 runner 没有 Mihomo 镜像而失败，发布流程未进入镜像推送阶段。路由预检现先检查本地镜像，缺失时限时拉取固定 digest；五种原生解析仍使用 `--network none` 和 `--pull=never`，不依赖预热缓存。

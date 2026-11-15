@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import http.client
+import json
 import os
 import multiprocessing
 import shlex
@@ -12,6 +13,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from . import render
+from .model import POLICY
 from .cli import NoRedirect
 from .storage import Store
 from .routes import asset_paths, labelled_paths
@@ -78,16 +81,27 @@ def snapshot(store):
             return result
         beats = store.read(store.model / 'heartbeats.json') if (store.model / 'heartbeats.json').exists() else {}
         now = time.time()
-        result['nodes'] = sum(1 for key, node in state['nodes'].items()
-                              if node['enabled'] and node['ready'] and node['acked'] == node['desired']
-                              and 0 <= now - beats.get(key, 0) < settings.lease_seconds)
         local = state['nodes'].get('local', {})
         result['local_required'] = bool(settings.local_node and local.get('enabled'))
         result['local_ready'] = bool(local.get('ready') and local.get('acked') == local.get('desired')
                                      and 0 <= now - beats.get('local', 0) < settings.lease_seconds)
         paths = asset_paths(state['users']['owner']['token'])
         path, name, _ = paths[0]
-        manifest = store.read(store.current() / 'manifest.json')
+        directory = store.current()
+        manifest = store.read(directory / 'manifest.json')
+        # Count only lines in this exact published asset that are still backed
+        # by live, acknowledged runtimes. A state-only count can approve an
+        # empty or older subscription during a pending/failed publication.
+        store.safe_path(directory / name)
+        with (directory / name).open('rb') as stream:
+            body = stream.read(MAX_ASSET + 1)
+        if len(body) > MAX_ASSET or hashlib.sha256(body).hexdigest() != manifest['files'][name]:
+            raise ProbeFailure('state')
+        published = json.loads(body)
+        selectable = next(g['proxies'] for g in published['proxy-groups'] if g['name'] == POLICY)
+        live, _ = render.client_nodes(settings, store.publication_state(state, now), state['users']['owner'])
+        result['nodes'] = sum(node['name'] in selectable and node in published['proxies'] for node in live)
+        result['revision'] = manifest['revision']
         result.update(url=settings.origin + path, expected=manifest['files'][name],
                       rules=manifest['quality'],
                       links=[(label, settings.origin + p) for label, p in labelled_paths(state['users']['owner']['token'])])
@@ -144,8 +158,8 @@ def probe(root, pipe):
         pipe.send({'phase': 'state', 'reason': 'state'})
         after = snapshot(store)
         # A concurrent publication/revocation must not endorse the old response.
-        matched = after.get('url') == before['url'] and after.get('expected') == before['expected']
-        result = {k: v for k, v in after.items() if k not in ('url', 'expected', 'links')}
+        matched = all(after.get(key) == before[key] for key in ('url', 'expected', 'revision'))
+        result = {k: v for k, v in after.items() if k not in ('url', 'expected', 'links', 'revision')}
         result.update(phase='https', https=matched, ready=matched and after['nodes'] > 0,
                       reason='node' if matched else 'state')
         if result['ready']:

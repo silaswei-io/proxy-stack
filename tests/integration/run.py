@@ -32,10 +32,15 @@ CADDY = os.environ.get("TEST_CADDY_IMAGE", "caddy:2.11.4@sha256:0c994536bddb6644
 MIHOMO = os.environ.get("TEST_MIHOMO_IMAGE", "metacubex/mihomo:v1.19.15@sha256:da91cd45f1c96fe964982d7bcf3e7252d122022c65694365f3cd36c76e2d2ebd")
 
 
+def redact(value):
+    return re.sub(r"\b(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{48})\b",
+                  "[redacted]", value)
+
+
 def docker(*args, check=True):
     result = subprocess.run(["docker", *map(str, args)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if check and result.returncode:
-        raise RuntimeError("Docker command failed: " + result.stderr + result.stdout)
+        raise RuntimeError("Docker command failed: " + redact(result.stderr + result.stdout))
     return (result.stdout + (result.stderr if args and args[0] == "logs" else "")).strip()
 
 
@@ -85,6 +90,7 @@ def tunnel(port, context, state, user, origin_ip, server_hostname="localhost"):
                     raise ValueError("unexpected websocket frame")
                 result += recv_exact(stream, size)
             assert result.startswith(b"\x00\x00HTTP/1."), result[:40]
+            return result
 
 
 def ip_integration(root, data, identifier, containers, state, origin_ip):
@@ -471,7 +477,7 @@ def main():
             multinode_integration(root, identifier, containers)
         except BaseException:
             for name in containers:
-                print("DIAGNOSTIC (disposable test container): " + name + "\n" + re.sub(r"/[0-9a-f]{48}(?=/|[\s?\"]|$)", "/[redacted]", docker("logs", name, check=False)), flush=True)
+                print("DIAGNOSTIC (disposable test container): " + name + "\n" + redact(docker("logs", name, check=False)), flush=True)
             raise
         finally:
             for name in reversed(containers):
