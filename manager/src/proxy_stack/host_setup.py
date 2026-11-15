@@ -311,11 +311,31 @@ class Host:
         # the real config so Caddy resolves every relative import identically.
         parent = Path(config).parent
         fd, temporary = tempfile.mkstemp(prefix='.proxy-stack-plan-', suffix='.caddy', dir=parent)
+        # Use the actual absolute filename supplied to Caddy, including resolved
+        # parent aliases, so its automatically generated hide item is exact.
+        temporary = str(Path(temporary).resolve())
         try:
             with os.fdopen(fd, 'w') as out:
                 out.write(text)
             raw = self.run([binary, 'adapt', '--adapter', 'caddyfile', '--config', temporary], cwd=str(parent))
-            return json.loads(raw)
+            adapted = json.loads(raw)
+            def canonicalize(value):
+                if isinstance(value, dict):
+                    hidden = value.get('hide')
+                    if value.get('handler') == 'file_server' and isinstance(hidden, list) and temporary in hidden:
+                        # Caddy adds the source Caddyfile to file_server.hide and
+                        # deduplicates it against explicit user hide settings.
+                        # Change only our exact temporary item, never other hide
+                        # paths, handlers, or arbitrary config string values.
+                        value['hide'] = [str(config) if item == temporary else item for item in hidden
+                                         if item != temporary or str(config) not in hidden]
+                    for child in value.values():
+                        canonicalize(child)
+                elif isinstance(value, list):
+                    for child in value:
+                        canonicalize(child)
+            canonicalize(adapted)
+            return adapted
         finally:
             Path(temporary).unlink(missing_ok=True)
 

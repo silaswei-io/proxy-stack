@@ -25,6 +25,9 @@ def run(*args, env=None, timeout=30):
     return result.stdout.decode()
 
 
+subprocess.run([sys.executable, str(ROOT / 'tests/integration/caddy_filename.py')], check=True)
+
+
 with tempfile.TemporaryDirectory(prefix='proxy-stack-native-plan-') as temporary:
     root = Path(temporary).resolve()
     original = ('# original bytes and braces in comments { }\n{\n email admin@example.com\n}\n'

@@ -158,6 +158,64 @@ class HostSetupTests(unittest.TestCase):
         self.assertEqual((self.stage / 'original').stat().st_mode & 0o777, 0o600)
         self.assertNotIn('reload', self.host.events.read_text())
 
+    def test_adapt_only_canonicalizes_its_exact_file_server_hide_item(self):
+        for explicit_original in (False, True):
+            with self.subTest(explicit_original=explicit_original):
+                seen = []
+                def adapt(argv, **kwargs):
+                    temporary = argv[argv.index('--config') + 1]
+                    seen.append(Path(temporary))
+                    self.assertTrue(Path(temporary).is_file())
+                    self.assertEqual(Path(temporary).read_text(), self.old.decode())
+                    self.assertEqual(kwargs['cwd'], str(self.host.config.parent))
+                    user_hide = ['*.secret', '.proxy-stack-plan-user.caddy', temporary + '.backup']
+                    if explicit_original:
+                        user_hide.insert(0, str(self.host.config))
+                    return json.dumps({'nested': [{'handler': 'file_server', 'hide': user_hide + [temporary]},
+                                                  {'handler': 'static_response', 'body': temporary, 'hide': [temporary]}]})
+                with patch.object(self.host, 'run', side_effect=adapt):
+                    result = self.host.adapt(str(self.host.binary), self.host.config, self.old.decode())
+                temporary = str(seen[0])
+                expected = ['*.secret', '.proxy-stack-plan-user.caddy', temporary + '.backup']
+                if explicit_original:
+                    expected.insert(0, str(self.host.config))
+                else:
+                    expected.append(str(self.host.config))
+                self.assertEqual(result['nested'][0]['hide'], expected)
+                self.assertEqual(result['nested'][1], {'handler': 'static_response', 'body': temporary, 'hide': [temporary]})
+                self.assertFalse(seen[0].exists())
+                self.unchanged()
+
+    def test_file_server_plan_recheck_apply_and_rollback_keep_user_hide(self):
+        original_run = self.host.run
+        def run(argv, **kwargs):
+            raw = original_run(argv, **kwargs)
+            if 'adapt' in argv:
+                value = json.loads(raw)
+                path = argv[argv.index('--config') + 1]
+                value['apps']['http']['servers']['srv0']['routes'][0]['handle'] = [
+                    {'handler': 'file_server', 'hide': ['*.secret', str(self.host.config), path]}]
+                return json.dumps(value)
+            return raw
+        with patch.object(self.host, 'run', side_effect=run):
+            value = self.plan()
+            candidate = json.loads((self.stage / 'candidate.json').read_text())
+            hidden = candidate['apps']['http']['servers']['srv0']['routes'][0]['handle'][0]['hide']
+            self.assertEqual(hidden, ['*.secret', str(self.host.config)])
+            setup.recheck(self.host, value)
+            active = self.host.active()
+            active['apps']['http']['servers']['srv0']['routes'][0]['handle'][0]['hide'].append('/real-drift')
+            with patch.object(self.host, 'active', return_value=active):
+                with self.assertRaises(setup.Refused):
+                    setup.recheck(self.host, value)
+                with self.assertRaises(setup.Refused):
+                    setup.apply(self.host, self.stage)
+            self.unchanged()
+            setup.apply(self.host, self.stage)
+            setup.rollback(self.host, self.stage)
+            self.unchanged()
+        self.assertFalse(list(self.host.config.parent.glob('.proxy-stack-plan-*')))
+
     def test_real_systemctl_reload_metadata_and_legacy_raw_journal_recover(self):
         self.assertEqual(setup.command_identity(RELOAD_BEFORE), setup.command_identity(RELOAD_AFTER))
         value = self.plan()

@@ -1,5 +1,11 @@
 # v1.0.0 验证记录
 
+## 2026-11-15 宿主 Caddy file_server 文件名误判修复
+
+`Host.adapt` 仍在原配置旁写临时候选文件，仅将原生 Caddy 在 `file_server.hide` 中自动加入的精确临时路径还原为原配置路径；原配置已被用户显式隐藏时，按 Caddy 行为去重。其他 hide 项、其他 handler 和配置值均不替换，运行配置与磁盘、计划后复查、应用后验证及回滚的严格比较保留。
+
+新增固定 digest 的 Caddy 2.11.4 原生回归，接入现有 integration preflight：隔离容器实际启动 Caddy，验证三个 file_server（含相对 import）、显式隐藏原文件、计划/原生校验/应用/复查/回滚，并通过真实 admin 配置变更确认用户 hide 漂移仍被拒绝。仅模拟 systemd/进程身份边界，不发布宿主端口。Docker 宿主适配单测 **17 项通过**，安装器回归 **55 项通过**（233.677 秒），原生回归通过；shell 语法、root/template 一致性和差异检查通过。此次不重跑无关完整套件；未 SSH、部署或修改真实服务。
+
 ## 2026-11-15 受管服务端两跳线路（本地 worktree）
 
 实现保留三种安装角色和 v1.0.0 命名，仅增加中心线路模型、入口 desired 扩展、Xray user 路由与两种订阅的普通节点条目。每条线路持久化随机内部 ID；入口按用户 UUID namespace + 内部 ID 派生 UUID，普通出口保持 generation/lease_seconds/ws_path/users 四字段对象。控制扩展按入口裁剪为必要出口端点，避免发送完整拓扑或订阅/peer token。使用紧凑线路描述而非逐用户重复出站描述，入口再生成完整 Xray 配置。
