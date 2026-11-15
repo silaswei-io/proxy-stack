@@ -81,7 +81,11 @@ def native(binary):
             '{\n    admin off', '{\n    local_certs\n    skip_install_trust\n    storage file_system {\n        root ' + str(upstream_data) + '\n    }\n    admin off', 1)
         config = config.replace('/srv/public/current', str(store.public / 'current'))
         upstream_config = root / 'upstream.Caddyfile'
-        upstream_config.write_text(config)
+        # Preload a test wildcard certificate on the host through an exact
+        # existing site. This keeps real HTTPS while leaving the host's default
+        # ACME policy/subject generation identical to a normal public setup.
+        # No host issuer is replaced with a global local_certs catch-all.
+        upstream_config.write_text(config + '\n*.example.com:9443 {\n respond "fixture certificate"\n}\n')
         upstream_log = root / 'upstream.log'
         host_log = root / 'host.log'
         alias_log = root / 'alias.log'
@@ -90,15 +94,18 @@ def native(binary):
             upstream_ca = upstream_data / 'pki/authorities/local/root.crt'
             wait_file(upstream_ca)
             upstream_context = ssl.create_default_context(cafile=str(upstream_ca))
+            wildcard = upstream_data / 'certificates/local/wildcard_.example.com/wildcard_.example.com'
+            wildcard_cert = str(wildcard) + '.crt'
+            wildcard_key = str(wildcard) + '.key'
+            wait_file(Path(wildcard_cert))
+            wait_file(Path(wildcard_key))
             host = NativeHost(root / 'host')
             shutil.copyfile(binary, host.binary)
             host.binary.chmod(0o700)
             host_data = root / 'host-data'
             host.config.write_text('''{
  admin 127.0.0.1:2019
- local_certs
- skip_install_trust
- auto_https disable_redirects
+ auto_https disable_certs
  storage file_system {
  root ''' + str(host_data) + '''
  }
@@ -107,6 +114,17 @@ http://legacy.example.com:80 {
  file_server {
  hide /private *.secret
  }
+}
+special.example.com {
+ tls ''' + wildcard_cert + ' ' + wildcard_key + ''' {
+  issuer acme {
+   disable_http_challenge
+  }
+ }
+ respond "special"
+}
+one.example.com, files.example.com, www.example.com {
+ respond "existing HTTPS"
 }
 ''')
             host_original = host.config.read_bytes()
@@ -119,6 +137,21 @@ http://legacy.example.com:80 {
                 except host_setup.Refused:
                     assert host_process.poll() is None and time.monotonic() < until, 'host startup'
                     time.sleep(.05)
+            host_baseline = host.active()
+            original_policies = host_baseline['apps']['tls']['automation']['policies']
+            assert len(original_policies) == 2, original_policies
+            custom = next(p for p in original_policies if p['subjects'] == ['special.example.com'])
+            assert custom['issuers'][0]['module'] == 'acme'
+            assert custom['issuers'][0]['challenges']['http']['disabled'] is True
+            assert any('one.example.com' in p.get('subjects', []) for p in original_policies)
+
+            def check_policies(added=False):
+                expected = json.loads(json.dumps(original_policies))
+                if added:
+                    default = next(p for p in expected if 'one.example.com' in p.get('subjects', []))
+                    default['subjects'].append('subscriptions.example.com')
+                actual = host.active()['apps']['tls']['automation']['policies']
+                assert actual == expected, (actual, expected)
 
             class NativeDeployment(domains.Deployment):
                 def preflight(self, recovering=False):
@@ -130,7 +163,7 @@ http://legacy.example.com:80 {
                     # Exact same verifier + TLS defaults; bounded retries allow
                     # asynchronous internal issuance. Never disable TLS checks.
                     from proxy_stack.cli import verify
-                    ca = host_data / 'pki/authorities/local/root.crt' if origin.startswith('https://subscriptions.') else upstream_ca
+                    ca = upstream_ca
                     wait_file(ca)
                     with patch.dict(os.environ, {'SSL_CERT_FILE': str(ca)}):
                         deadline = time.monotonic() + 8
@@ -161,10 +194,17 @@ http://legacy.example.com:80 {
                         raise AssertionError('host reload failure was not rolled back')
                 assert host.config.read_bytes() == host_original
                 assert store.state() == original
+                check_policies()
                 deployment.operate('add', 'subscriptions.example.com')
+                check_policies(added=True)
                 assert store.state()['nodes'] == original['nodes']
                 assert store.state()['users'] == original['users']
-                context = ssl.create_default_context(cafile=str(host_data / 'pki/authorities/local/root.crt'))
+                context = ssl.create_default_context(cafile=str(upstream_ca))
+                def check_original_https():
+                    for name in ('one', 'files', 'www', 'special'):
+                        expected = b'special' if name == 'special' else b'existing HTTPS'
+                        assert request(name + '.example.com', 443, '/', context)[2] == expected
+                check_original_https()
                 # Every friend/owner canonical and legacy URL, GET + HEAD,
                 # including complete QX resources, must be equal on IP/origin.
                 for user in original['users'].values():
@@ -186,6 +226,7 @@ http://legacy.example.com:80 {
                 host_process = launch(host.config, host_log, dict(os.environ, SSL_CERT_FILE=str(upstream_ca)))
                 time.sleep(.3)
                 deployment.confirm('https://subscriptions.example.com')
+                check_policies(added=True)
                 # With the upstream CA absent, host Caddy must reject upstream
                 # TLS. Its handled error must not log any private request path.
                 host_process.terminate()
@@ -201,6 +242,9 @@ http://legacy.example.com:80 {
                 deployment.operate('remove')
                 assert store.state() == original
                 assert host.config.read_bytes() == host_original
+                check_policies()
+                check_original_https()
+                print('PASS: native existing HTTPS hosts/custom TLS issuer policy; only owned alias subject added/removed, policies survive reload rollback and restart')
                 # Unknown pre-existing aliases are never silently adopted.
                 unknown = host.config.read_text() + '\nsubscriptions.example.com {\n respond "custom"\n}\n'
                 host.config.write_text(unknown)
@@ -282,6 +326,8 @@ def main():
         subprocess.run(['docker', 'run', '--rm', '--network', 'none', '--read-only', '--cap-drop=ALL',
                         '--cap-add=NET_BIND_SERVICE', '--tmpfs', '/tmp:exec', '--tmpfs', '/data', '--tmpfs', '/config',
                         '--add-host', 'origin.example.com:127.0.0.1', '--add-host', 'subscriptions.example.com:127.0.0.1',
+                        '--add-host', 'one.example.com:127.0.0.1', '--add-host', 'files.example.com:127.0.0.1',
+                        '--add-host', 'www.example.com:127.0.0.1', '--add-host', 'special.example.com:127.0.0.1',
                         '-p', '127.0.0.1::443', '-v', str(binary) + ':/fixture/caddy:ro',
                         '-v', str(ROOT / 'manager/src/proxy_stack') + ':/app/proxy_stack:ro',
                         '-v', str(ROOT / 'tests') + ':/tests:ro', '--entrypoint', 'python', TOOL,

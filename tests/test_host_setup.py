@@ -1,5 +1,6 @@
 """Isolated host adapter/transaction tests; never contact the real host service."""
 import json
+import copy
 import os
 import signal
 import subprocess
@@ -17,6 +18,103 @@ from proxy_stack import host_setup as setup
 # Real systemctl show layout before/after systemctl reload on stock Caddy 2.6.
 RELOAD_BEFORE = '{ path=/usr/bin/caddy ; argv[]=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0 }'
 RELOAD_AFTER = '{ path=/usr/bin/caddy ; argv[]=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force ; ignore_errors=no ; start_time=[Wed 2026-11-04 06:22:38 UTC] ; stop_time=[Wed 2026-11-04 06:22:38 UTC] ; pid=54219 ; code=exited ; status=0 }'
+
+
+class AliasTLSPolicyTests(unittest.TestCase):
+    def setUp(self):
+        self.subject = 'subscriptions.example.com'
+        self.before = {'apps': {
+            'http': {'servers': {'srv0': {'listen': [':443'], 'routes': [
+                {'match': [{'host': ['one.example.com']}], 'handle': [{'handler': 'file_server'}]}]}}},
+            'tls': {'automation': {'policies': [
+                {'subjects': ['special.example.com'], 'issuers': [
+                    {'challenges': {'http': {'disabled': True}}, 'module': 'acme'}]},
+                {'subjects': ['one.example.com', 'files.example.com', 'www.example.com']}]}},
+            'pki': {'certificate_authorities': {'local': {'name': 'Existing CA'}}}}}
+        self.after = copy.deepcopy(self.before)
+        self.after['apps']['tls']['automation']['policies'][1]['subjects'].insert(2, self.subject)
+        self.after['apps']['http']['servers']['srv0']['routes'].append(
+            {'match': [{'host': [self.subject]}], 'handle': [{'handler': 'reverse_proxy'}]})
+
+    def test_only_explicit_owned_subject_is_allowed_without_mutating_configs(self):
+        original, candidate = copy.deepcopy(self.before), copy.deepcopy(self.after)
+        with self.assertRaises(setup.Refused):
+            setup.preserve_routes(self.before, self.after)
+        setup.preserve_routes(self.before, self.after, alias_subject=self.subject)
+        self.assertEqual(self.before, original)
+        self.assertEqual(self.after, candidate)
+        # Removal must compare the smaller restored config to the owned config.
+        with self.assertRaises(setup.Refused):
+            setup.preserve_routes(self.after, self.before, alias_subject=self.subject)
+
+    def test_refuses_issuer_challenge_storage_automation_and_other_app_changes(self):
+        mutations = [
+            lambda a: a['tls']['automation']['policies'][0]['issuers'][0].update(module='internal'),
+            lambda a: a['tls']['automation']['policies'][0]['issuers'][0]['challenges']['http'].update(disabled=False),
+            lambda a: a['tls']['automation']['policies'][1].update(issuers=[{'module': 'internal'}]),
+            lambda a: a['tls'].update(storage={'module': 'file_system', 'root': '/other'}),
+            lambda a: a['tls']['automation'].update(renew_interval=60),
+            lambda a: a['pki']['certificate_authorities']['local'].update(name='Changed CA'),
+            lambda a: a.update(layer4={'servers': {}}),
+            lambda a: a.pop('tls'),
+        ]
+        for mutation in mutations:
+            candidate = copy.deepcopy(self.after)
+            mutation(candidate['apps'])
+            with self.subTest(mutation=mutations.index(mutation)), self.assertRaises(setup.Refused):
+                setup.preserve_routes(self.before, candidate, alias_subject=self.subject)
+        candidate = copy.deepcopy(self.after)
+        candidate['storage'] = {'module': 'file_system', 'root': '/other'}
+        with self.assertRaises(setup.Refused):
+            setup.preserve_routes(self.before, candidate, alias_subject=self.subject)
+
+    def test_refuses_unrelated_duplicate_ambiguous_and_reordered_subjects(self):
+        mutations = [
+            lambda p: p[1]['subjects'].append('unrelated.example.com'),
+            lambda p: p[1]['subjects'].remove('files.example.com'),
+            lambda p: p[1]['subjects'].reverse(),
+            lambda p: p[1]['subjects'].append(self.subject),
+            lambda p: p[0]['subjects'].append(self.subject),
+            lambda p: p[0]['subjects'].append('one.example.com'),
+            lambda p: p.append({'subjects': ['extra.example.com']}),
+        ]
+        for index, mutation in enumerate(mutations):
+            candidate = copy.deepcopy(self.after)
+            mutation(candidate['apps']['tls']['automation']['policies'])
+            with self.subTest(mutation=index), self.assertRaises(setup.Refused):
+                setup.preserve_routes(self.before, candidate, alias_subject=self.subject)
+        before = copy.deepcopy(self.before)
+        before['apps']['tls']['automation']['policies'][1].pop('subjects')
+        with self.assertRaises(setup.Refused):
+            setup.preserve_routes(before, self.after, alias_subject=self.subject)
+
+    def test_stock_26_disjoint_policy_reorder_allowed_but_ambiguous_precedence_refused(self):
+        candidate = copy.deepcopy(self.after)
+        candidate['apps']['tls']['automation']['policies'].reverse()
+        setup.preserve_routes(self.before, candidate, alias_subject=self.subject)
+        for matcher in ([], ['*.example.com'], ['ONE.example.com']):
+            before, after = copy.deepcopy(self.before), copy.deepcopy(candidate)
+            before['apps']['tls']['automation']['policies'][0]['subjects'] = matcher
+            after['apps']['tls']['automation']['policies'][1]['subjects'] = matcher
+            with self.subTest(matcher=matcher), self.assertRaises(setup.Refused):
+                setup.preserve_routes(before, after, alias_subject=self.subject)
+
+    def test_refuses_wrong_or_missing_route_ownership_and_original_route_changes(self):
+        with self.assertRaises(setup.Refused):
+            setup.preserve_routes(self.before, self.after, alias_subject='wrong.example.com')
+        for kind in ('missing', 'duplicate', 'original-route', 'listener'):
+            candidate = copy.deepcopy(self.after)
+            server = candidate['apps']['http']['servers']['srv0']
+            if kind == 'missing':
+                server['routes'].pop()
+            elif kind == 'duplicate':
+                server['routes'].append(copy.deepcopy(server['routes'][-1]))
+            elif kind == 'original-route':
+                server['routes'][0]['handle'][0]['handler'] = 'static_response'
+            else:
+                server['listen'] = [':8443']
+            with self.subTest(kind=kind), self.assertRaises(setup.Refused):
+                setup.preserve_routes(self.before, candidate, alias_subject=self.subject)
 
 
 class HostFixture(setup.Host):
@@ -337,6 +435,38 @@ class HostSetupTests(unittest.TestCase):
             self.plan()
         self.unchanged()
         self.assertFalse((self.stage / 'journal.json').exists())
+
+    def test_installer_http01_plan_does_not_opt_into_tls_subject_changes(self):
+        fixture = AliasTLSPolicyTests()
+        fixture.setUp()
+        def adapted(binary, config, text):
+            return copy.deepcopy(fixture.after if 'BEGIN proxy-stack-http01' in text else fixture.before)
+        with patch.object(self.host, 'adapt', side_effect=adapted), self.assertRaises(setup.Refused):
+            self.plan()
+        self.unchanged()
+        self.assertFalse((self.stage / 'journal.json').exists())
+
+    def test_owned_tls_plan_keeps_recheck_apply_and_rollback_guards(self):
+        fixture = AliasTLSPolicyTests()
+        fixture.setUp()
+        def adapted(binary, config, text):
+            return copy.deepcopy(fixture.after if '# alias candidate' in text else fixture.before)
+        with patch.object(self.host, 'adapt', side_effect=adapted):
+            value = setup.plan_text(self.host, self.stage, self.old.decode() + '# alias candidate\n',
+                                    'proxy-stack-sub-' + 'a' * 16, alias_subject=fixture.subject)
+            drift = copy.deepcopy(fixture.before)
+            drift['apps']['tls']['automation']['policies'][0]['issuers'][0]['module'] = 'internal'
+            with patch.object(self.host, 'active', return_value=drift), self.assertRaises(setup.Refused):
+                setup.apply(self.host, self.stage)
+            self.unchanged()
+            setup.recheck(self.host, value)
+            setup.apply(self.host, self.stage)
+            drift = copy.deepcopy(fixture.after)
+            drift['apps']['tls']['automation']['policies'][1]['subjects'].append('external.example.com')
+            with patch.object(self.host, 'active', return_value=drift), self.assertRaises(setup.Refused):
+                setup.rollback(self.host, self.stage)
+            setup.rollback(self.host, self.stage)
+            self.unchanged()
 
     def test_race_recheck_refuses_changed_file_process_and_import_graph(self):
         self.plan()

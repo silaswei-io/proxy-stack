@@ -124,7 +124,8 @@ def host_candidate(host, stage, settings, endpoint, identity, removing=False):
         if not listeners.strip() or any(set(re.findall(r'pid=(\d+)', line)) != {service['pid']} for line in listeners.splitlines()):
             raise ValueError('HTTPS 端口不属于受支持的宿主 Caddy')
         candidate = original + '\n' + site
-    return host_setup.plan_text(host, stage, candidate, identity, service=service, removing=removing)
+    return host_setup.plan_text(host, stage, candidate, identity, service=service, removing=removing,
+                                alias_subject=endpoint.domain)
 
 
 class Deployment:

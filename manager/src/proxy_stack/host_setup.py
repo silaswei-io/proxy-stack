@@ -393,7 +393,67 @@ def normalized_route(value):
     return visit(value)
 
 
-def preserve_routes(before, after):
+def preserve_tls_subject(before, after, subject):
+    """Permit one owned subject in one existing policy; all else stays exact.
+
+    The caller supplies the smaller config first, also when removing a site.
+    Never discard the TLS app or normalize issuers or settings. Stock Caddy
+    2.6 may reorder policies; permit that only for disjoint exact subjects.
+    """
+    import copy
+    candidate = copy.deepcopy(after)
+    old = before.get('automation', {}).get('policies', [])
+    new = candidate.get('automation', {}).get('policies', [])
+    if not isinstance(old, list) or not isinstance(new, list) or len(old) != len(new):
+        raise Refused('候选配置改变 TLS 自动化策略')
+    for policies in (old, new):
+        seen = set()
+        for policy in policies:
+            subjects = policy.get('subjects', [])
+            if (not isinstance(subjects, list) or any(not isinstance(s, str) for s in subjects)
+                    or len(set(subjects)) != len(subjects) or seen.intersection(subjects)):
+                raise Refused('TLS 自动化 subject 重复或不明确')
+            seen.update(subjects)
+        if policies is old and subject in seen:
+            raise Refused('TLS 自动化 subject 已存在；不是新增的托管别名')
+    changed = 0
+    for policy in new:
+        if subject in policy.get('subjects', []):
+            policy['subjects'].remove(subject)
+            if not policy['subjects']:
+                raise Refused('不能改变无 subject 限制的 TLS 策略')
+            changed += 1
+    if old != new:
+        # Reordering cannot alter precedence only when every matcher is an
+        # explicit, disjoint hostname. No catch-all, wildcard or duplicate.
+        if any(not p.get('subjects') or any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?', s)
+               for s in p['subjects']) for p in old + new):
+            raise Refused('TLS 策略匹配不明确；拒绝重排或改变策略')
+        remaining = list(new)
+        for policy in old:
+            if policy not in remaining:
+                raise Refused('候选配置改变非托管 TLS subject 或策略设置')
+            remaining.remove(policy)
+        candidate['automation']['policies'] = copy.deepcopy(old)
+    if changed != 1 or candidate != before:
+        raise Refused('候选配置改变非托管 TLS subject 或策略设置')
+
+
+def preserve_routes(before, after, alias_subject=None):
+    if alias_subject is not None:
+        if not isinstance(alias_subject, str) or not re.fullmatch(r'[a-z0-9.-]+', alias_subject):
+            raise Refused('无效的托管 TLS subject')
+        if ({k: v for k, v in before.items() if k != 'apps'} !=
+                {k: v for k, v in after.items() if k != 'apps'}):
+            raise Refused('候选配置改变原有全局设置')
+        if set(after.get('apps', {})) - set(before.get('apps', {})) - {'http', 'tls'}:
+            raise Refused('候选配置引入其他非 HTTP 应用')
+        def occurrences(config):
+            return sum(hosts(route.get('match', [])).count(alias_subject)
+                       for server in config.get('apps', {}).get('http', {}).get('servers', {}).values()
+                       for route in server.get('routes', []))
+        if occurrences(before) != 0 or occurrences(after) != 1:
+            raise Refused('TLS subject 不属于唯一新增的别名站点')
     old = before.get('apps', {}).get('http', {}).get('servers', {}).values()
     new = after.get('apps', {}).get('http', {}).get('servers', {}).values()
     for server in old:
@@ -412,7 +472,10 @@ def preserve_routes(before, after):
             remaining.remove(normalized)
     for app, value in before.get('apps', {}).items():
         if app != 'http' and after.get('apps', {}).get(app) != value:
-            raise Refused('候选配置改变原有非 HTTP 应用')
+            if app == 'tls' and alias_subject is not None:
+                preserve_tls_subject(value, after.get('apps', {}).get(app, {}), alias_subject)
+            else:
+                raise Refused('候选配置改变原有非 HTTP 应用')
 
 
 def plan(host, stage, domain, port, identity):
@@ -449,7 +512,7 @@ def plan(host, stage, domain, port, identity):
 
 
 def plan_text(host, stage, text, identity, service=None, dependencies=None, original=None, baseline=None,
-              removing=False):
+              removing=False, alias_subject=None):
     """Shared native validation/journal for a precisely owned site change."""
     stage = Path(stage)
     stage.mkdir(mode=0o700, exist_ok=True)
@@ -465,7 +528,10 @@ def plan_text(host, stage, text, identity, service=None, dependencies=None, orig
         raise Refused('运行中的 Caddy 配置与磁盘不同；保留原服务')
     candidate = text.encode()
     adapted = host.adapt(service['binary'], config, candidate.decode())
-    preserve_routes(adapted, baseline) if removing else preserve_routes(baseline, adapted)
+    if removing:
+        preserve_routes(adapted, baseline, alias_subject=alias_subject)
+    else:
+        preserve_routes(baseline, adapted, alias_subject=alias_subject)
     atomic(stage / 'candidate.json', json.dumps(adapted).encode())
     host.validate(service['binary'], stage / 'candidate.json')
     metadata = config.stat()

@@ -1,5 +1,20 @@
 # v1.0.0 验证记录
 
+## 2026-11-15 宿主订阅别名与既有 TLS 自动化策略兼容修复
+
+宿主已有分域名 TLS 策略时，Caddy 为新增别名扩展默认策略的 subjects，原先将整个 TLS app 严格判等会误拒绝。现在仅独立订阅别名生命周期显式传入托管主机名，证明它属于唯一新增/移除的 HTTP 站点后，允许一个既有 TLS 策略增减这一个 subject。其他 subjects、签发器、challenge、存储、automation 设置、其他 app、原有路由/监听器及全局设置继续校验；安装器 HTTP-01 计划不启用此例外。
+
+stock Caddy 2.6.2 在上述变化后还会调整策略顺序。仅当每项策略都有非空、无通配符、互不重叠的明确主机名，且删除托管 subject 后各项完整策略一一匹配时，允许其重排；无 subject 的兜底、重复/歧义匹配、其他策略内容变更均拒绝。原生 validate、预检后的磁盘/服务/admin 复查、应用后精确配置比较及日志恢复保护保留。
+
+最终本地 macOS / Docker Desktop、Linux arm64 验证：
+
+- `docker build -t proxy-stack-tool:v1.0.0 -f manager/Dockerfile .` 成功。
+- `docker run --rm --network none --entrypoint python -v "$PWD:/source:ro" -w /source -e PYTHONPATH=/source/manager/src:/source/tests proxy-stack-tool:v1.0.0 -m unittest test_host_setup test_domains -v`：**47 项通过，2.749 秒**。新增覆盖默认严格拒绝、仅托管 subject 允许、错误归属/重复/歧义/不相关 subject 拒绝、issuer/challenge/存储/其他 app/路由/监听器变更拒绝、分离策略重排、HTTP-01 不启用例外，以及 admin 漂移下应用/恢复拒绝。
+- `python3 tests/integration/preflight.py` 全部通过。Caddy 2.11.4 原生夹具含四个既有 HTTPS 域名、单域名自定义 ACME challenge 策略和默认 subject 策略；真实别名添加/移除、reload 失败回滚、重启后，策略与原 HTTPS 请求保持正确。另以实际 Debian Caddy 2.6.2 原生 adapt/validate 验证 subject 扩展及策略重排，默认严格比较仍拒绝相同变化。现有真实 Compose、资源/可信 TLS/上游 TLS 拒绝和安装器预检继续通过。
+- Python `compileall` 和 `git diff --check` 通过。此窄修复未重跑无关完整安装器套件或完整出站集成；前一提交的178项全量及完整集成结果见下节。
+
+原生宿主夹具从临时 internal CA 预先加载通配符测试证书，并禁用该夹具的自动签发，保持实际 HTTPS 校验，同时让原生适配器生成与公共 ACME 相同结构的 subject 策略；没有用全局 `local_certs` 兜底掩盖该缺陷。没有绑定宿主80/443、连接真实服务器、push 或部署；公网 ACME 实际签发/续期和生产环境兼容性不在本次本地验收范围内。
+
 ## 2026-11-15 安装后独立订阅别名生命周期
 
 本次功能只管理已安装 hub 的订阅别名，不重新实现安装器已有的域名/HTTPS。原控制入口、节点登记、用户身份和两跳线路保持独立；包含首选链接及嵌入资源 URL、中文菜单、容器/宿主 Caddy、事务回滚和中断恢复。已有手工别名采用明确的人工迁移流程，不自动接管未知站点，见 [订阅域名管理](SUBSCRIPTION_DOMAINS.md)。

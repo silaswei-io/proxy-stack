@@ -195,7 +195,21 @@ parsed=json.loads(raw)
 assert 'tls_server_name' not in raw and 'insecure_skip_verify' not in raw
 Path('/work/alias26.json').write_text(raw)
 host.validate(binary,'/work/alias26.json')
-print('PASS: actual Debian stock '+version+'; native relative imports, candidate/alias HTTPS upstream validation and cleanup')
+# An explicit per-host issuer makes Caddy emit a generated default policy with
+# subjects. Only the owned alias may extend that existing policy, on stock 2.6.
+policy_original=original+'\nspecial.example.com {\n tls {\n issuer acme {\n disable_http_challenge\n }\n }\n respond "existing"\n}\n'
+policy_before=host.adapt(binary,config,policy_original)
+policy_after=host.adapt(binary,config,policy_original+'\n'+alias)
+assert policy_before['apps']['tls'] != policy_after['apps']['tls']
+try: preserve_routes(policy_before,policy_after)
+except Exception: pass
+else: raise AssertionError('HTTP-01 strict comparison allowed TLS subject mutation')
+preserve_routes(policy_before,policy_after,alias_subject='subscription.example.com')
+Path('/work/policy26.json').write_text(json.dumps(policy_after))
+host.validate(binary,'/work/policy26.json')
+assert host.adapt(binary,config,policy_original)==policy_before
+assert not list(config.parent.glob('.proxy-stack-plan-*'))
+print('PASS: actual Debian stock '+version+'; native relative imports, candidate/alias HTTPS upstream validation, scoped TLS subject policy and cleanup')
 '''
     print(run('docker', 'run', '--rm', '--network', 'none', '--read-only', '--cap-drop=ALL',
               '--cap-add=NET_BIND_SERVICE', '--tmpfs', '/data', '--tmpfs', '/config', '--tmpfs', '/tmp',
