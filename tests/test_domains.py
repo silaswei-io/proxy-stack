@@ -1,16 +1,21 @@
 import copy
 import errno
+import fcntl
 import io
 import json
+import multiprocessing
 import os
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from proxy_stack import domains, render, rules
 from proxy_stack.cli import main
@@ -18,6 +23,134 @@ from proxy_stack.finish import snapshot
 from proxy_stack.model import Settings, subscription_endpoint
 from proxy_stack.storage import Store
 from proxy_stack.install_state import desired
+
+
+class ConfirmationTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.deployment = domains.Deployment(Path(self.temporary.name).resolve())
+
+    @contextmanager
+    def timed_workers(self, outcomes):
+        # Model checker runtimes without spending 15+ real seconds per attempt.
+        clock = SimpleNamespace(now=0)
+        def advance(seconds):
+            clock.now += seconds
+        context = Mock()
+        children = []
+        def pipe(duplex):
+            duration, success = outcomes[min(len(children), len(outcomes) - 1)]
+            child = Mock()
+            child.alive = True
+            child.is_alive.side_effect = lambda: child.alive
+            def terminate():
+                child.alive = False
+            child.terminate.side_effect = terminate
+            reader, writer = Mock(), Mock()
+            def poll(timeout):
+                advance(min(duration, timeout))
+                if timeout < duration:
+                    return False
+                child.alive = False
+                return True
+            reader.poll.side_effect = poll
+            reader.recv.return_value = success
+            children.append(child)
+            return reader, writer
+        context.Pipe.side_effect = pipe
+        context.Process.side_effect = lambda **kwargs: children[-1]
+        fake_time = SimpleNamespace(monotonic=lambda: clock.now, sleep=advance)
+        with patch('multiprocessing.get_context', return_value=context), \
+                patch.object(domains, 'time', fake_time), redirect_stdout(io.StringIO()):
+            yield clock, children
+
+    def test_healthy_checker_over_old_attempt_limit_finishes_without_restart(self):
+        with self.timed_workers([(20, True)]) as (clock, children):
+            self.deployment.confirm('https://subscriptions.example.com')
+        self.assertEqual(clock.now, 20)
+        self.assertEqual(len(children), 1)
+        children[0].terminate.assert_not_called()
+        children[0].join.assert_called_once()
+
+    def test_failed_checker_can_retry_with_remaining_overall_budget(self):
+        with self.timed_workers([(4, False), (20, True)]) as (clock, children):
+            self.deployment.confirm('https://subscriptions.example.com')
+        self.assertEqual(clock.now, 26)  # Failure, two-second retry pause, success.
+        self.assertEqual(len(children), 2)
+
+    def test_default_total_deadline_remains_120_seconds(self):
+        with self.timed_workers([(200, True)]) as (clock, children):
+            with self.assertRaisesRegex(ValueError, '事务回滚'):
+                self.deployment.confirm('https://subscriptions.example.com')
+        self.assertEqual(clock.now, 120)
+        self.assertEqual(len(children), 1)
+        children[0].terminate.assert_called_once()
+        children[0].join.assert_called_once()
+
+    @contextmanager
+    def real_workers(self):
+        context = multiprocessing.get_context('fork')
+        children = []
+        def process(**kwargs):
+            child = context.Process(**kwargs)
+            children.append(child)
+            return child
+        wrapper = SimpleNamespace(Pipe=context.Pipe, Process=process)
+        try:
+            with patch('multiprocessing.get_context', return_value=wrapper):
+                yield context, children
+        finally:
+            for child in children:
+                if child.is_alive():
+                    child.kill()
+                child.join(timeout=2)
+
+    def assert_reaped(self, children):
+        self.assertEqual(len(children), 1)
+        self.assertFalse(children[0].is_alive())
+        self.assertEqual(children[0].exitcode, -signal.SIGTERM)
+
+    def test_total_timeout_reaps_worker_and_releases_its_model_lock(self):
+        self.deployment.store.layout()
+        with self.real_workers() as (context, children):
+            entered = context.Event()
+            def blocked(store, origin):
+                with store.locked():
+                    entered.set()
+                    time.sleep(10)
+            previous = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            try:
+                start = time.monotonic()
+                with patch('proxy_stack.cli.verify', side_effect=blocked), redirect_stdout(io.StringIO()):
+                    with self.assertRaisesRegex(ValueError, '事务回滚'):
+                        self.deployment.confirm('https://subscriptions.example.com', wait=.5)
+                self.assertLess(time.monotonic() - start, 2)
+                self.assertTrue(entered.is_set())
+                self.assert_reaped(children)
+                with (self.deployment.store.locks / 'operation.lock').open('r+') as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                signal.signal(signal.SIGTERM, previous)
+
+    def test_interruption_reaps_worker_without_model_lock_during_network(self):
+        self.deployment.store.init(Settings('8.8.8.8', 'Hub'))
+        with self.real_workers() as (context, children):
+            entered = context.Event()
+            def blocked_network(*args, **kwargs):
+                entered.set()
+                time.sleep(10)
+            def interrupt(timeout):
+                self.assertTrue(entered.wait(2), 'checker never reached network')
+                # Nonblocking acquisition detects any lock held by parent or checker.
+                with (self.deployment.store.locks / 'operation.lock').open('r+') as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                raise KeyboardInterrupt
+            with patch('proxy_stack.cli.urllib.request.OpenerDirector.open', side_effect=blocked_network), \
+                    patch('multiprocessing.connection.Connection.poll', side_effect=interrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    self.deployment.confirm('https://subscriptions.example.com')
+            self.assert_reaped(children)
 
 
 class Fixture(domains.Deployment):

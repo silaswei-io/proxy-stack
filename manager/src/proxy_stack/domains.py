@@ -267,7 +267,7 @@ class Deployment:
             writer.close()
             success = False
             try:
-                if reader.poll(min(15, max(0, deadline - time.monotonic()))):
+                if reader.poll(max(0, deadline - time.monotonic())):
                     try:
                         success = reader.recv()
                     except EOFError:
