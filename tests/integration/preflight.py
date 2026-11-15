@@ -26,6 +26,7 @@ def run(*args, env=None, timeout=30):
 
 
 subprocess.run([sys.executable, str(ROOT / 'tests/integration/caddy_filename.py')], check=True)
+subprocess.run([sys.executable, str(ROOT / 'tests/integration/domains.py')], check=True)
 
 
 with tempfile.TemporaryDirectory(prefix='proxy-stack-native-plan-') as temporary:
@@ -185,7 +186,16 @@ try: host.adapt(binary,config,'this is { invalid')
 except Exception: pass
 else: raise AssertionError('bad candidate accepted')
 assert not list(config.parent.glob('.proxy-stack-plan-*'))
-print('PASS: actual Debian stock '+version+'; native relative imports, candidate validation and cleanup')
+from proxy_stack import render
+from proxy_stack.model import Settings
+alias=render.subscription_site(Settings('subscription.example.com','Alias'),Settings('8.8.8.8','Hub',port=2096))
+Path('/work/alias26').write_text(alias)
+raw=host.run([binary,'adapt','--adapter','caddyfile','--config','/work/alias26'])
+parsed=json.loads(raw)
+assert 'tls_server_name' not in raw and 'insecure_skip_verify' not in raw
+Path('/work/alias26.json').write_text(raw)
+host.validate(binary,'/work/alias26.json')
+print('PASS: actual Debian stock '+version+'; native relative imports, candidate/alias HTTPS upstream validation and cleanup')
 '''
     print(run('docker', 'run', '--rm', '--network', 'none', '--read-only', '--cap-drop=ALL',
               '--cap-add=NET_BIND_SERVICE', '--tmpfs', '/data', '--tmpfs', '/config', '--tmpfs', '/tmp',

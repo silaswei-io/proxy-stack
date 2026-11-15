@@ -76,6 +76,9 @@ marker=.proxy-stack-managed
 recover_previous() {
   local previous owner_pid owner_start current_start permissions file
   [ -d "$directory.install-lock" ] && [ ! -L "$directory.install-lock" ] || fail '安装锁不安全。'
+  if [ -e "$directory.install-lock/domain-owner" ]; then
+    fail '未完成的域名事务；请先用该安装目录的 proxyctl domain recover 恢复。'
+  fi
   file="$directory.install-lock/owner"
   [ -f "$file" ] && [ ! -L "$file" ] && [ -O "$file" ] || fail '安装锁缺少安全的恢复记录。'
   IFS= read -r previous < "$file" || fail '恢复记录为空。'
@@ -392,6 +395,15 @@ fi
   printf 'HTTP_BIND=%s\nHTTP_PORT=%s\nHTTP01_ONLY=true\nROLE=%s\nLOCAL_NODE=%s\nCOMPOSE_PROJECT_NAME=%s\n' "$http_bind" "$http_port" "$role" "$local_node" "$project"
   if [ "$mode" = existing-caddy ]; then printf 'COMPOSE_FILE=compose.yaml:compose.external.yaml\n'; fi
 } > .env
+if $repeat && [ -e "$directory/compose.subscription.yaml" ]; then
+  [ -f "$directory/compose.subscription.yaml" ] && [ ! -L "$directory/compose.subscription.yaml" ] || fail '订阅 Compose 文件不安全。'
+  cp -p -- "$directory/compose.subscription.yaml" compose.subscription.yaml
+  if [ "$mode" = existing-caddy ]; then subscription_base=compose.yaml:compose.external.yaml; else subscription_base=compose.yaml; fi
+  # Keep the alias port overlay across installer template refreshes.
+  sed '/^COMPOSE_FILE=/d' .env > .env.subscription
+  printf 'COMPOSE_FILE=%s:compose.subscription.yaml\n' "$subscription_base" >> .env.subscription
+  mv .env.subscription .env
+fi
 # Avoid needless rewriting of an identical managed dotenv.
 if $repeat; then
   for file in .env .env.example proxyctl compose.yaml compose.external.yaml; do
@@ -424,7 +436,23 @@ quiet timeout 15 docker compose config --quiet || fail 'Compose 候选配置无�
 printf '验证 Caddy 镜像与完整候选配置（最多 120 秒）…\n'
 quiet timeout 120 docker pull "$caddy_image" || fail 'Caddy 镜像不可用；安装目录未写入。'
 timeout 15 docker run --rm --read-only --cap-drop=ALL --network none -e "DOMAIN=$domain" -e "NODE_NAME=$node_name" -e "PUBLIC_PORT=$port" -e "MODE=$mode" -e "ROLE=$role" -e "LOCAL_NODE=$local_node" -e HTTP01_ONLY=true "$tool_image" preview-caddy > "$stage/Caddyfile" 2>>"$operator_log"
-quiet timeout 20 docker run --rm --read-only --cap-drop=ALL --network none --cap-add=NET_BIND_SERVICE --tmpfs /data --tmpfs /config --tmpfs /tmp -v "$stage/Caddyfile:/etc/caddy/Caddyfile:ro" "$caddy_image" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile || fail 'Caddy 候选配置验证失败；安装目录未写入。'
+# Validate the exact managed include dependency, including on installer reruns.
+# A glob is optional when empty, but never accepts unreviewed sibling files.
+mkdir "$stage/subscription"
+if $repeat; then
+  for part in data data/runtime data/runtime/caddy data/runtime/caddy/subscription; do
+    [ ! -L "$directory/$part" ] || fail '订阅 include 目录含符号链接。'
+  done
+  namespace="$directory/data/runtime/caddy/subscription"
+  if [ -d "$namespace" ]; then
+    for file in "$namespace"/* "$namespace"/.[!.]* "$namespace"/..?*; do
+      [ -e "$file" ] || [ -L "$file" ] || continue
+      [ "${file##*/}" = alias.Caddyfile ] && [ -f "$file" ] && [ ! -L "$file" ] || fail '存在未知订阅 include 文件；安装目录未改变。'
+      cp -p -- "$file" "$stage/subscription/alias.Caddyfile"
+    done
+  fi
+fi
+quiet timeout 20 docker run --rm --read-only --cap-drop=ALL --network none --cap-add=NET_BIND_SERVICE --tmpfs /data --tmpfs /config --tmpfs /tmp -v "$stage/Caddyfile:/etc/caddy/Caddyfile:ro" -v "$stage/subscription:/etc/caddy/subscription:ro" "$caddy_image" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile || fail 'Caddy 候选配置验证失败；安装目录未写入。'
 if $host_route; then
   command -v python3 >/dev/null 2>&1 || fail '80 已占用；自动集成需要宿主 Python 3。'
   timeout 45 python3 "$stage/install/host_setup.py" plan --stage "$stage/host" --domain "$domain" --port "$http_port" --identity "$project" || fail '宿主 Caddy 预检未通过；安装目录未写入。'

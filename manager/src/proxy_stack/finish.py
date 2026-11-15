@@ -14,7 +14,7 @@ import urllib.request
 from pathlib import Path
 
 from . import render
-from .model import POLICY
+from .model import POLICY, subscription_endpoint
 from .cli import NoRedirect
 from .storage import Store
 from .routes import asset_paths, labelled_paths
@@ -102,9 +102,9 @@ def snapshot(store):
         live, _ = render.client_nodes(settings, store.publication_state(state, now), state['users']['owner'])
         result['nodes'] = sum(node['name'] in selectable and node in published['proxies'] for node in live)
         result['revision'] = manifest['revision']
-        result.update(url=settings.origin + path, expected=manifest['files'][name],
+        result.update(url=subscription_endpoint(state).origin + path, expected=manifest['files'][name],
                       rules=manifest['quality'],
-                      links=[(label, settings.origin + p) for label, p in labelled_paths(state['users']['owner']['token'])])
+                      links=[(label, subscription_endpoint(state).origin + p) for label, p in labelled_paths(state['users']['owner']['token'])])
         return result
 
 

@@ -11,7 +11,7 @@ import urllib.error
 import urllib.request
 
 from . import __version__
-from .model import Settings, default_node_name, username
+from .model import Settings, default_node_name, username, subscription_endpoint
 from .rules import download
 from .storage import Store
 from .routes import asset_paths, labelled_paths
@@ -30,50 +30,53 @@ def verify(store, base_url=None):
             raise ValueError("verify subscriptions on the hub")
         manifest = store.validate_revision(store.current())
         settings = store.settings(state)
-        origin = (base_url or settings.origin).rstrip("/")
+        origin = (base_url or subscription_endpoint(state).origin).rstrip("/")
         if not origin.startswith(("https://", "http://")):
             raise ValueError("verify base must be HTTP(S)")
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect, urllib.request.HTTPSHandler(context=ssl.create_default_context()))
-        token = state["users"]["owner"]["token"]
-        checked = 0
-        for path, name, expected_type in asset_paths(token):
-            expected = manifest["files"][name]
-            for alias in (path, "/" + name):
-                for method in ("GET", "HEAD"):
-                    request = urllib.request.Request(origin + alias, method=method)
-                    with opener.open(request, timeout=20) as response:
-                        if (response.status != 200 or response.headers.get("Cache-Control") != "no-store"
-                                or response.headers.get("Referrer-Policy") != "no-referrer"
-                                or response.headers.get("X-Content-Type-Options") != "nosniff"):
-                            raise ValueError("invalid asset response")
-                        if response.headers.get_content_type() != expected_type:
-                            raise ValueError("unexpected asset MIME type")
-                        if method == "GET":
-                            digest = hashlib.sha256()
-                            total = 0
-                            while True:
-                                chunk = response.read(65536)
-                                if not chunk:
-                                    break
-                                total += len(chunk)
-                                if total > 128 * 1024 * 1024:
-                                    raise ValueError("published asset too large")
-                                digest.update(chunk)
-                            if digest.hexdigest() != expected:
-                                raise ValueError("served asset differs from revision")
-                checked += 1
-        for path in ("/", "/manifest.json", "/current/", "/sub/" + token + "/", "/sub/" + "0" * 48 + "/clash.yaml",
-                     "/" + token + "/", "/" + token + "/rules/unknown", "/" + "0" * 48 + "/clash",
-                     "/" + token + "/quantumult-x/../clash", "/" + token + "/clash?extra=1"):
-            try:
-                opener.open(origin + path, timeout=20).close()
-            except urllib.error.HTTPError as error:
-                if error.code == 404:
-                    continue
-                raise ValueError("unexpected unknown-path response") from None
-            raise ValueError("unknown path was exposed")
-        return {"http_verified": checked, "tls_chain_verified": origin.startswith("https://"),
-                "native_qx": "UNVERIFIED on iOS", "external_client_reachability": "not tested", "vless_egress": "not tested by verify"}
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect, urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+    token = state["users"]["owner"]["token"]
+    checked = 0
+    for path, name, expected_type in asset_paths(token):
+        expected = manifest["files"][name]
+        for alias in (path, "/" + name):
+            for method in ("GET", "HEAD"):
+                request = urllib.request.Request(origin + alias, method=method)
+                with opener.open(request, timeout=20) as response:
+                    if (response.status != 200 or response.headers.get("Cache-Control") != "no-store"
+                            or response.headers.get("Referrer-Policy") != "no-referrer"
+                            or response.headers.get("X-Content-Type-Options") != "nosniff"):
+                        raise ValueError("invalid asset response")
+                    if response.headers.get_content_type() != expected_type:
+                        raise ValueError("unexpected asset MIME type")
+                    if method == "GET":
+                        digest = hashlib.sha256()
+                        total = 0
+                        while True:
+                            chunk = response.read(65536)
+                            if not chunk:
+                                break
+                            total += len(chunk)
+                            if total > 128 * 1024 * 1024:
+                                raise ValueError("published asset too large")
+                            digest.update(chunk)
+                        if digest.hexdigest() != expected:
+                            raise ValueError("served asset differs from revision")
+            checked += 1
+    for path in ("/", "/manifest.json", "/current/", "/sub/" + token + "/", "/sub/" + "0" * 48 + "/clash.yaml",
+                 "/" + token + "/", "/" + token + "/rules/unknown", "/" + "0" * 48 + "/clash",
+                 "/" + token + "/quantumult-x/../clash", "/" + token + "/clash?extra=1"):
+        try:
+            opener.open(origin + path, timeout=20).close()
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                continue
+            raise ValueError("unexpected unknown-path response") from None
+        raise ValueError("unknown path was exposed")
+    with store.locked(updater=True):
+        if store.current().name != manifest["revision"]:
+            raise ValueError("publication changed during verification")
+    return {"http_verified": checked, "tls_chain_verified": origin.startswith("https://"),
+            "native_qx": "UNVERIFIED on iOS", "external_client_reachability": "not tested", "vless_egress": "not tested by verify"}
 
 
 def serve(store, interval):
@@ -99,6 +102,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="proxy-stack")
     parser.add_argument("--version", action="version", version=__version__)
     sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("domain-helper", help=argparse.SUPPRESS)
+    domain = sub.add_parser("domain", help="subscription domain (mutations: use proxyctl domain)")
+    domain.add_argument("action", choices=("show", "list"))
     sub.add_parser("installer", help="emit a self-contained Bash installer on stdout")
     sub.add_parser("validate-input", help="validate installer inputs without writing data")
     sub.add_parser("detect-public-ip", help="detect a global public IP with bounded HTTPS probes")
@@ -110,6 +116,7 @@ def main(argv=None):
     sub.add_parser("init")
     links = sub.add_parser("links")
     links.add_argument("--user", default="owner", type=username)
+    links.add_argument("--original", action="store_true", help="use the preserved original entry")
     links.add_argument("--labelled", action="store_true", help="label the private subscription and rule resource URLs")
     finish_parser = sub.add_parser("finish", help="bounded HTTPS/subscription and node readiness check")
     finish_parser.add_argument("--wait", type=int, choices=range(0, 121), default=0, metavar="0..120")
@@ -145,13 +152,20 @@ def main(argv=None):
     user.add_argument("action", choices=("add", "revoke"))
     user.add_argument("name", type=username)
     args = parser.parse_args(argv)
+    if args.command == "domain-helper":
+        from .domains import helper_zip
+        sys.stdout.buffer.write(helper_zip())
+        return 0
     if args.command == "installer":
         from .installer import script
         sys.stdout.write(script())
         return 0
     store = Store(os.environ.get("PROXY_STACK_DATA", "/data"))
     try:
-        if args.command == "detect-public-ip":
+        if args.command == "domain":
+            from .domains import show
+            print(json.dumps(show(store), ensure_ascii=False))
+        elif args.command == "detect-public-ip":
             from .discovery import detect_public_ip
             print(detect_public_ip())
         elif args.command == "default-node-name":
@@ -273,7 +287,7 @@ def main(argv=None):
                     if args.user not in state["users"]:
                         raise ValueError("unknown user")
                     for label, path in labelled_paths(state["users"][args.user]["token"]):
-                        print((label + ": " if args.labelled else "") + store.settings(state).origin + path)
+                        print((label + ": " if args.labelled else "") + (store.settings(state).origin if args.original else subscription_endpoint(state).origin) + path)
                 else:
                     result = store.health()
                     if args.command == "status":

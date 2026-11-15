@@ -2,7 +2,7 @@
 import json
 
 from . import chains
-from .model import POLICY, SOURCES, Settings, groups
+from .model import POLICY, SOURCES, Settings, groups, subscription_endpoint
 from .routes import ASSET_PATTERN, PUBLIC_PATTERN, RULE_NAMES, canonical_path, caddy_rewrites
 
 DOMESTIC_DOH = ["https://dns.alidns.com/dns-query", "https://doh.pub/dns-query"]
@@ -131,7 +131,7 @@ def caddy(settings, state, external=False):
         start = result.index("    @tunnel path")
         end = result.index("    @asset {", start)
         result = result[:start] + result[end:]
-    return result
+    return result + "\nimport /etc/caddy/subscription/*.Caddyfile\n"
 
 
 def ip_tls(settings):
@@ -188,6 +188,9 @@ def client_nodes(settings, state, user):
 
 def public_files(settings, state, cache):
     endpoints = [Settings(**n["settings"]) for n in state.get("nodes", {}).values() if n.get("enabled")]
+    subscription = subscription_endpoint(state) if state.get("subscription") else settings
+    if subscription.domain != settings.domain:
+        endpoints.append(subscription)
     routing = groups(settings, cache["lists"], endpoints)
     files = {}
     # Keep all nine existing URLs and their classical payload format for cached
@@ -213,7 +216,7 @@ def public_files(settings, state, cache):
     for user in state["users"].values():
         base = "sub/" + user["token"] + "/"
         def url(suffix):
-            return settings.origin + canonical_path(user["token"], suffix)
+            return subscription.origin + canonical_path(user["token"], suffix)
         nodes, qx_nodes = client_nodes(settings, state, user)
         names = [node["name"] for node in nodes]
         clash = {"mixed-port": 7890, "allow-lan": False, "mode": "rule", "log-level": "warning", "ipv6": False,
@@ -266,3 +269,57 @@ final, {POLICY}
 [mitm]
 """
     return files
+
+
+def subscription_site(endpoint, upstream=None, identity=None):
+    """Exact assets only; never expose WebSocket/control paths on an alias.
+
+    A host alias uses verified HTTPS to the original public entry. A container
+    alias serves the same immutable public revision directly.
+    """
+    if upstream:
+        handler = f"""        reverse_proxy {upstream.origin} {{
+            header_up Host {upstream.host}
+            transport http {{
+                tls_server_name {upstream.domain}
+                dial_timeout 3s
+                response_header_timeout 10s
+            }}
+        }}
+"""
+    else:
+        handler = f"""        root * /srv/public/current
+        route {{
+{caddy_rewrites()}        header Cache-Control "no-store"
+        header X-Content-Type-Options "nosniff"
+        header Referrer-Policy "no-referrer"
+        @yaml path *.yaml
+        header @yaml Content-Type "application/yaml; charset=utf-8"
+        @text path *.txt *.conf *.list
+        header @text Content-Type "text/plain; charset=utf-8"
+        file_server
+        }}
+"""
+    text = f"""{endpoint.host}:{endpoint.port} {{
+    @unsafe expression `{{http.request.orig_uri}}.contains("%") || {{http.request.orig_uri}}.contains("..") || {{http.request.orig_uri}}.contains("//") || {{http.request.orig_uri}}.contains("/./") || {{http.request.orig_uri}}.contains("?")`
+    route {{
+    handle @unsafe {{
+        respond "Not found" 404
+    }}
+    @subscription {{
+        method GET HEAD
+        path_regexp subscription {PUBLIC_PATTERN}
+    }}
+    handle @subscription {{
+{handler}    }}
+    handle {{
+        respond "Not found" 404
+    }}
+    }}
+}}
+"""
+    if upstream:
+        text = text.removesuffix("}\n") + '    handle_errors {\n        respond "Not found" 404\n    }\n}\n'
+    if identity:
+        text = '# BEGIN ' + identity + '\n' + text + '# END ' + identity + '\n'
+    return text

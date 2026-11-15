@@ -2,9 +2,11 @@
 
 一个订阅中心管理多台机器。每位朋友各有稳定订阅 URL 和独立 UUID；同一个 Mihomo/Clash Meta 或 Quantumult X 订阅包含发布的就绪节点与服务端两跳线路。国内、局域网、Apple/iCloud 直连，其余走 `VPS` 节点组。没有就绪节点时，默认代理流量被拒绝，避免意外直连。
 
+已安装且登记了节点的中心，可以另外添加独立订阅别名：`./proxyctl domain add sub.example.com`。它保留原控制/节点地址和所有身份，单独管理别名 HTTPS；菜单 16–19 可查看、添加、移除和恢复。使用方式、DNS/端口要求、已有手工别名迁移及事务回滚见 [订阅域名管理](docs/SUBSCRIPTION_DOMAINS.md)。原安装器的域名/HTTPS 安装功能继续按下面流程使用。
+
 ## 安装
 
-支持 **Linux、本机 rootful Docker Engine、Compose ≥ 2.24.4、Bash 和 GNU coreutils（timeout/sha256sum）**。不支持 Docker Desktop 的端口预检、远程 Docker 或 rootless Docker。独立安装不需要宿主 Python/git；自动集成宿主 Caddy 需要 Linux root、systemd、Python 3 和 `ss`。
+支持 **Linux、本机 rootful Docker Engine、Compose ≥ 2.24.4、Bash 和 GNU coreutils（timeout/sha256sum）**。不支持 Docker Desktop 的端口预检、远程 Docker 或 rootless Docker。独立安装不需要宿主 Python/git；可选的安装后订阅域名管理需要宿主 Python 3.9+（包括栈内 Caddy 方式），自动集成宿主 Caddy 另需 Linux root、systemd 和 `ss`。
 
 ```sh
 docker run --pull=always --rm ghcr.io/silaswei-io/proxy-stack:v1.0.0 installer | bash

@@ -14,7 +14,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from . import render, rules, chains
-from .model import Settings, TOKEN, username
+from .model import Settings, TOKEN, username, subscription_endpoint
 from .topology import initialize, validate, invalidate
 
 
@@ -51,7 +51,7 @@ class Store:
             raise ValueError("symlink model directory is not allowed")
         paths = [self.public, self.public / "releases", self.cache, self.locks]
         if not updater:
-            paths += [self.model, self.runtime, self.runtime / "xray", self.runtime / "caddy"]
+            paths += [self.model, self.runtime, self.runtime / "xray", self.runtime / "caddy", self.runtime / "caddy/subscription"]
         for path in paths:
             if path.is_symlink():
                 raise ValueError("symlink directory is not allowed")
@@ -61,7 +61,7 @@ class Store:
     @contextmanager
     def locked(self, updater=False, operation="operation.lock"):
         self.layout(updater)
-        if operation not in ("operation.lock", "refresh.lock"):
+        if operation not in ("operation.lock", "refresh.lock", "domain.lock"):
             raise ValueError("invalid lock")
         fd = os.open(self.locks / operation, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
@@ -90,6 +90,7 @@ class Store:
         if len({u["token"] for u in state["users"].values()}) != len(state["users"]) or len({u["uuid"] for u in state["users"].values()}) != len(state["users"]):
             raise ValueError("duplicate user credentials in state")
         self.settings(state)
+        subscription_endpoint(state)
         if not state["ws_path"].startswith("/ws/") or not TOKEN.fullmatch(state["ws_path"][4:]):
             raise ValueError("invalid WebSocket path")
         return validate(state)
@@ -170,7 +171,7 @@ class Store:
         finally:
             candidate.unlink(missing_ok=True)
 
-    def commit(self, state, cache, private=False, refresh=None):
+    def commit(self, state, cache, private=False, refresh=None, subscription=False):
         """Stage first; ordinary failures restore all previously written files.
 
         This is not a cross-filesystem crash transaction. Interrupted user mutations
@@ -180,6 +181,8 @@ class Store:
         writes = [(self.cache / "rules.json", render.encoded(cache))]
         if refresh is not None:
             writes.append((self.cache / "refresh.json", render.encoded(refresh)))
+        if subscription and not private:
+            writes.append((self.model / "state.json", render.encoded(state)))
         if private:
             xray_state = dict(state, chains=chains.entry_routes(state, state["nodes"].get("local")))
             writes += [(self.model / "state.json", render.encoded(state)),

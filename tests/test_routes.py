@@ -1,5 +1,6 @@
 """The verifier resolves public aliases against the physical private manifest."""
 import io
+import fcntl
 import json
 import os
 import tempfile
@@ -57,6 +58,27 @@ class VerifyRoutesTests(unittest.TestCase):
         config = json.loads((self.store.current() / self.paths[0][1]).read_text())
         for resource in config['rule-providers'].values():
             self.assertIn((resource['url'].removeprefix('https://proxy.example.com'), 'GET'), self.calls)
+
+    def test_network_verification_releases_model_lock_and_rejects_publication_race(self):
+        original = self.open
+        def open_unlocked(request, timeout):
+            with (self.store.locks / 'operation.lock').open('a') as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return original(request, timeout)
+        with patch('proxy_stack.cli.urllib.request.build_opener') as build:
+            build.return_value.open.side_effect = open_unlocked
+            verify(self.store)
+        count = []
+        def racing(request, timeout):
+            response = open_unlocked(request, timeout)
+            if not count:
+                count.append(True)
+                self.store.init(self.store.settings(self.store.state()))
+            return response
+        with patch('proxy_stack.cli.urllib.request.build_opener') as build:
+            build.return_value.open.side_effect = racing
+            with self.assertRaisesRegex(ValueError, 'publication changed'):
+                verify(self.store)
 
     def test_verify_does_not_accept_wrong_body_or_mime_on_canonical_route(self):
         for failure in ('body', 'mime', 'privacy'):

@@ -1,5 +1,22 @@
 # v1.0.0 验证记录
 
+## 2026-11-15 安装后独立订阅别名生命周期
+
+本次功能只管理已安装 hub 的订阅别名，不重新实现安装器已有的域名/HTTPS。原控制入口、节点登记、用户身份和两跳线路保持独立；包含首选链接及嵌入资源 URL、中文菜单、容器/宿主 Caddy、事务回滚和中断恢复。已有手工别名采用明确的人工迁移流程，不自动接管未知站点，见 [订阅域名管理](SUBSCRIPTION_DOMAINS.md)。
+
+最终代码在本地 macOS / Docker Desktop 29.2.1、Linux arm64 容器中完成以下验证：
+
+- `docker build -t proxy-stack-tool:v1.0.0 -f manager/Dockerfile .` 成功。
+- `docker run --rm --network none --entrypoint python -v "$PWD:/source:ro" -w /source -e PYTHONPATH=/source/manager/src proxy-stack-tool:v1.0.0 -m unittest discover -s tests -v`：**178 项全部通过，259.815 秒**。覆盖端口8443添加/删除及失败回滚、80拒绝、真实预检下停止 Caddy 后恢复、未知 include 拒绝、IPv4-only 端口探测、并发用户/节点/线路变更保留、wrapper/菜单，以及 `python -S` 独立 zip helper。
+- `python3 tests/integration/run.py`：完整原生集成通过，包括 Mihomo、Xray、Caddy、精确资源 GET/HEAD/404、可信 TLS、实际 owner/朋友 VLESS/WSS 出站、多节点登记/撤销/租约、两跳线路与 updater 隔离。
+- `python3 tests/integration/preflight.py`：最后一次安装器 include 校验变更后再次通过。覆盖固定 Caddy 2.11.4 和实际 Debian stock 2.6.2、宿主别名添加/移除/reload 失败回滚、原文件字节恢复、朋友及 QX 资源、外层/上游不可信 TLS 拒绝、证书重启保留和私密路径不入日志。
+- 上述 preflight 包含真实 Docker Compose 生命周期：添加后只重建 Caddy、HTTPS 验证、重启/init 持久化、移除、失败回滚和停止后的恢复；导出的安装器重跑后，真实 `docker compose config` 仍保留原 HTTPS、HTTP-01 和新增别名443。
+- `sh -n proxyctl`、`bash -n manager/src/proxy_stack/templates/installer.sh`、根 wrapper 与模板 `cmp`、Python `compileall` 及 `git diff --check` 均通过。
+
+端口夹具故障已定位：Docker 29 的 `internal` 网络容器虽然保留 `HostConfig.PortBindings`，实际 inspect `NetworkSettings.Ports` 列表为空；网络内可信 HTTPS 成功不能证明已发布宿主端口。用一次性 internal/普通 bridge 容器对比确认后，Compose 夹具改用普通 bridge，明确断言实际发布到 `127.0.0.1` 的随机高端口，并从宿主以可信测试 CA 请求该端口，核对内容。仅测试容器内目标443；未绑定宿主80/443。
+
+测试使用合成身份和临时 CA，不读取运行凭据；临时容器/网络/目录由 harness 清理。本次仅本地工作及提交，未 push、SSH、部署或修改真实服务。公网 ACME 实际签发/长期续期、防火墙外部可达性、Linux amd64 CI 和 iOS Quantumult X 原生导入未在本次验证。
+
 ## 2026-11-15 宿主 Caddy file_server 文件名误判修复
 
 `Host.adapt` 仍在原配置旁写临时候选文件，仅将原生 Caddy 在 `file_server.hide` 中自动加入的精确临时路径还原为原配置路径；原配置已被用户显式隐藏时，按 Caddy 行为去重。其他 hide 项、其他 handler 和配置值均不替换，运行配置与磁盘、计划后复查、应用后验证及回滚的严格比较保留。

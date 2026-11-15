@@ -445,8 +445,27 @@ def plan(host, stage, domain, port, identity):
                     names = hosts(route.get('match', []))
                     if not names or any(name == domain or name.startswith('*.') and domain.endswith(name[1:]) for name in names):
                         raise Refused('目标地址的 HTTP 路由已存在或有 catch-all；无法安全自动追加')
+    return plan_text(host, stage, candidate.decode(), identity, service, dependencies, original, baseline)
+
+
+def plan_text(host, stage, text, identity, service=None, dependencies=None, original=None, baseline=None,
+              removing=False):
+    """Shared native validation/journal for a precisely owned site change."""
+    stage = Path(stage)
+    stage.mkdir(mode=0o700, exist_ok=True)
+    service = service or host.service()
+    config = Path(service['config'])
+    original = config.read_bytes() if original is None else original
+    dependencies = dependencies or host.files(config)
+    baseline = baseline or host.adapt(service['binary'], config, original.decode())
+    admin = baseline.get('admin', {})
+    if admin.get('disabled') or admin.get('listen', 'localhost:2019') not in ('localhost:2019', '127.0.0.1:2019'):
+        raise Refused('自动集成需要标准本机 admin 端点')
+    if host.active() != baseline:
+        raise Refused('运行中的 Caddy 配置与磁盘不同；保留原服务')
+    candidate = text.encode()
     adapted = host.adapt(service['binary'], config, candidate.decode())
-    preserve_routes(baseline, adapted)
+    preserve_routes(adapted, baseline) if removing else preserve_routes(baseline, adapted)
     atomic(stage / 'candidate.json', json.dumps(adapted).encode())
     host.validate(service['binary'], stage / 'candidate.json')
     metadata = config.stat()

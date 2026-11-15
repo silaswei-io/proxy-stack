@@ -21,6 +21,10 @@ def desired(store, state):
                        node_name=os.environ.get('NODE_NAME', previous.node_name),
                        port=int(os.environ.get('PUBLIC_PORT', previous.port)),
                        mode=os.environ.get('MODE', previous.mode), http01_only=True)
+    if (store.root / 'domain-transaction/journal.json').exists():
+        raise ValueError('请先运行 proxyctl domain recover 完成域名事务')
+    if state.get('subscription') and (settings.domain, settings.port, settings.mode) != (previous.domain, previous.port, previous.mode):
+        raise ValueError('请先移除订阅域名，再重配原地址/端口/模式')
     changed_endpoint = (settings.domain, settings.port) != (previous.domain, previous.port)
     if changed_endpoint and previous.role == 'hub' and any(k != 'local' and n['enabled'] for k, n in state['nodes'].items()):
         raise ValueError('中心已有远程节点；不能自动更改控制地址/端口，原配置未改变')

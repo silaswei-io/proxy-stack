@@ -5,7 +5,6 @@ import time
 import urllib.request
 from pathlib import Path
 
-import yaml
 
 from .model import SOURCES, parse_entry
 
@@ -17,6 +16,7 @@ BOOTSTRAP = Path(__file__).parent / "bootstrap.json"
 
 
 def parse_payload(raw):
+    import yaml
     if len(raw) > MAX_BYTES:
         raise ValueError("rule asset too large")
     # Reject YAML aliases (including recursive aliases) and non-data YAML tags.

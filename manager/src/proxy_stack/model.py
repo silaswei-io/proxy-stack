@@ -184,3 +184,19 @@ def groups(settings, lists, endpoints=()):
         entries = [parse_entry(x, policy, no_resolve=name == "lancidr") for x in lists[name]]
         result.append((name, entries))
     return result
+
+
+def subscription_endpoint(state):
+    """The public asset origin never changes node/enrollment settings."""
+    settings = Settings(**state['settings'])
+    value = state.get('subscription')
+    if value is None:
+        return settings
+    if (settings.role != 'hub' or not isinstance(value, dict) or
+            set(value) != {'domain', 'port', 'backend', 'identity'} or
+            not isinstance(value['domain'], str) or not DOMAIN.fullmatch(value['domain']) or
+            value['domain'] == settings.domain or value['backend'] not in ('container', 'host') or
+            not isinstance(value['identity'], str) or
+            not re.fullmatch(r'proxy-stack-sub-[0-9a-f]{16}', value['identity'])):
+        raise ValueError('invalid subscription domain state')
+    return Settings(value['domain'], 'Subscription', port=value['port'])
